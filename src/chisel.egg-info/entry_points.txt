@@ -1,0 +1,17 @@
+[console_scripts]
+chisel = chisel.bin.chisel_main:main
+chisel_bedding = chisel.bin.chisel_bedding:main
+chisel_bins = chisel.Binner:main
+chisel_binsplot = chisel.BinPlotter:main
+chisel_calling = chisel.bin.chisel_calling:main
+chisel_cloning = chisel.bin.chisel_cloning:main
+chisel_combocall = chisel.bin.chisel_combocall:main
+chisel_nonormal = chisel.bin.chisel_nonormal:main
+chisel_nonormal_combocall = chisel.bin.chisel_nonormal_combocall:main
+chisel_nonormal_preprocess = chisel.bin.chisel_nonormal_preprocess:main
+chisel_plotting = chisel.bin.chisel_plotting:main
+chisel_prep = chisel.bin.chisel_prep:main
+chisel_preprocess = chisel.bin.chisel_preprocess:main
+chisel_pseudonormal = chisel.bin.chisel_pseudonormal:main
+chisel_rdr = chisel.bin.chisel_rdr:main
+

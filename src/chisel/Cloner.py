@@ -13,6 +13,7 @@ import numpy as np
 import scipy
 import scipy.cluster
 import scipy.cluster.hierarchy as hier
+import scipy.spatial.distance
 
 from Utils import *
 
@@ -26,6 +27,7 @@ def parse_args(args):
     parser.add_argument("-s", "--minsize", required=False, type=int, default=14, help="Minimum size of subpopultation to define a clone (default: 14)")
     parser.add_argument("-l", "--linkage", required=False, type=str, default='weighted', help="Linkage method to use for the hierarchical clustering (default: weighted, it must be a valid linkage method available in SciPy when using a non-euclidean distance, i.e. 'single', 'complete', 'average', 'weighted')")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: none)")
+    parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Weight every bin by its length when measuring differences between cells, so that --maxdiff and --refinement are fractions of the genome also with variable-length bins (default: disabled, every bin has the same weight)")
     args = parser.parse_args(args)
 
     if not os.path.isfile(args.INPUT):
@@ -51,7 +53,8 @@ def parse_args(args):
         'refinement' : args.refinement,
         'minsize' : args.minsize,
         'linkage' : args.linkage,
-        'seed' : args.seed
+        'seed' : args.seed,
+        'weighted' : args.weighted
     }
 
 
@@ -64,7 +67,8 @@ def main(args=None, stdout_file=None):
     cns, pos, cells = reading(args['input'])
 
     log('Clustering cells in clones')
-    clus = clustering(cns, pos, cells, args['maxdiff'], args['linkage'])
+    weights = binweights(pos) if args['weighted'] else None
+    clus = clustering(cns, pos, cells, args['maxdiff'], args['linkage'], weights)
 
     log('Selecting clones')
     clones = selecting(clus, args['minsize'])
@@ -72,7 +76,7 @@ def main(args=None, stdout_file=None):
 
     if len(clones) > 0 and args['refinement'] >= 0.0:
         log('Refining clustering')
-        clones, clus = refining(cns, clus, clones, args['refinement'])
+        clones, clus = refining(cns, clus, clones, args['refinement'], weights)
     log('Number of discarded cells: {} over {} in total'.format(len(set(cells) - set(clones.keys())), len(set(cells))), level='INFO')
 
     log('Profiling clones')
@@ -122,10 +126,21 @@ def reading(f):
     return cns, pos, cells
 
 
-def clustering(cns, pos, cells, maxdiff, linkage):
+def binweights(pos):
+    w = {b : float(b[2] - b[1]) for b in pos}
+    if len(set(w.values())) == 1 or min(w.values()) <= 0:
+        return None # equal lengths are the unweighted case, which is used to keep results identical
+    return w
+
+
+def clustering(cns, pos, cells, maxdiff, linkage, weights=None):
     states = {s : x for x, s in enumerate(set(cns[b][c] for b in pos for c in cells))}
     data = [[states[cns[b][c]] for b in pos] for c in cells]
-    linkage = hier.linkage(data, method=linkage, metric='hamming', optimal_ordering=True)
+    if weights is None:
+        linkage = hier.linkage(data, method=linkage, metric='hamming', optimal_ordering=True)
+    else:
+        dist = scipy.spatial.distance.pdist(np.array(data), metric='hamming', w=np.array([weights[b] for b in pos]))
+        linkage = hier.linkage(dist, method=linkage, optimal_ordering=True)
     if maxdiff != -1:
         clus = hier.fcluster(linkage, t=maxdiff, criterion='distance')
     else:
@@ -138,13 +153,17 @@ def selecting(clus, minsize):
     return {c : clus[c] for c in clus if size[clus[c]] >= minsize}
 
 
-def refining(cns, clus, chosen, maxdiff):
+def refining(cns, clus, chosen, maxdiff, weights=None):
     clones = set(chosen.values())
     safeargmax = (lambda C : argmax(C) if len(C) > 0 else (1, 1))
     getcn = (lambda g, i : safeargmax(Counter([cns[g][c] for c in chosen if chosen[c] == i])))
     profile = {g : {i : getcn(g, i) for i in clones} for g in cns}
     diff = (lambda i, c, g : 1 if profile[g][i] != cns[g][c] else 0)
-    weight = (lambda i, c : float(sum(diff(i, c, g) for g in profile)) / float(len(profile)))
+    if weights is None:
+        weight = (lambda i, c : float(sum(diff(i, c, g) for g in profile)) / float(len(profile)))
+    else:
+        totw = float(sum(weights[g] for g in profile))
+        weight = (lambda i, c : sum(weights[g] * diff(i, c, g) for g in profile) / totw)
     closest = (lambda c : min([(i, weight(i, c)) for i in clones], key=(lambda x : x[1])))
     ref = {c : closest(c) for c in clus if c not in chosen.keys()}
     newclones = {c : chosen[c] if c in chosen else ref[c][0] for c in clus if c in chosen or ref[c][1] <= maxdiff}

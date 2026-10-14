@@ -8,6 +8,7 @@ setuptools.setup(
     python_requires='==2.7.*',
     packages=['chisel', 'chisel.bin'],
     package_dir={'': 'src'},
+    package_data={'chisel': ['data/*.centromeres.txt']},
     author='Simone Zaccaria',
     author_email='s.zaccaria@ucl.ac.uk',
     description='Copy-number Haplotype Inference in Single-cell by Evolutionary Links',
@@ -53,5 +54,7 @@ setuptools.setup(
                                       'chisel_pseudonormal=chisel.bin.chisel_pseudonormal:main',
                                       'chisel_prep=chisel.bin.chisel_prep:main',
                                       'chisel_bedding=chisel.bin.chisel_bedding:main',
-                                      'chisel_rdr=chisel.bin.chisel_rdr:main']}
+                                      'chisel_rdr=chisel.bin.chisel_rdr:main',
+                                      'chisel_bins=chisel.Binner:main',
+                                      'chisel_binsplot=chisel.BinPlotter:main']}
 )

@@ -26,6 +26,7 @@ def parse_args(args):
     parser.add_argument("--cellprefix", type=str, required=False, default='CB:Z:', help="Prefix of cell barcode field in SAM format (default: CB:Z:)")
     parser.add_argument("--cellsuffix", type=str, required=False, default='', help="Suffix of cell barcode field in SAM format (default: none)")
     parser.add_argument("--outdir", required=False, default='./', type=str, help="Running directory where to write the list of selected cells (default: current directory)")
+    parser.add_argument("--bins", required=False, default=None, type=str, help="TSV/BED file of precomputed (e.g. variable-length) bins with columns CHR START END, such as the output of Binner.py; when given, -b/--size is ignored (default: fixed-size bins of -b/--size)")
     args = parser.parse_args(args)
 
     if not os.path.isfile(args.tumor):
@@ -59,12 +60,14 @@ def parse_args(args):
         args.jobs = mp.cpu_count()
     if args.jobs < 1:
         raise ValueError("The number of jobs must be positive!")
-    if args.minreads is not None and args.cellslist is not None:
-        raise ValueError("Only one between number of reads or list of cells can be specified!")
+    if args.cellslist is not None:
+        args.minreads = None # a given list of cells takes precedence over the default minimum number of reads
     if args.minreads and args.minreads < 1:
         raise ValueError("Minimum number of reads must be positive!")
     if args.cellslist and not os.path.isfile(args.cellslist):
         raise ValueError("Cell list does not exist!")
+    if args.bins is not None and not os.path.isfile(args.bins):
+        raise ValueError("Bins file does not exist: {}".format(args.bins))
 
     return {
         'tumor' : args.tumor,
@@ -78,7 +81,8 @@ def parse_args(args):
         'chrs' : args.chromosomes.split(),
         'prefix' : args.cellprefix,
         'suffix' : args.cellsuffix,
-        'outdir' : args.outdir
+        'outdir' : args.outdir,
+        'binsfile' : args.bins
     }
 
 
@@ -87,8 +91,13 @@ def main(args=None, stdout_file=None):
     args = parse_args(args)
     log('\n'.join(['Arguments:'] + ['{} : {}'.format(a, args[a]) for a in args]), level='INFO')
 
-    log('Computing bins')
-    bins = get_bins(args['ref'], args['chrs'], args['bins'], bams=[args['tumor'], args['normal']], samtools=args['samtools'])
+    if args['binsfile'] is None:
+        log('Computing bins')
+        bins = get_bins(args['ref'], args['chrs'], args['bins'], bams=[args['tumor'], args['normal']], samtools=args['samtools'])
+    else:
+        log('Reading bins')
+        bins = read_bins(args['binsfile'], args['chrs'])
+        log('Number of bins: {}'.format(sum(len(bins[c]) for c in bins)), level='INFO')
 
     log('Counting reads on normal')
     counts = counting_normal(args['normal'], bins, args['samtools'], args['J'])
@@ -104,8 +113,13 @@ def main(args=None, stdout_file=None):
         clist = set()
         with open(args['list'], 'r') as i:
             for l in i:
-                clist.add(l.strip().replace(',','\t').split()[0].replace('-1', ''))
-        names = set(e for c in counts for b in counts[c] for e in counts[c][b] if e in clist)
+                p = l.strip().replace(',','\t').split()
+                if len(p) > 0:
+                    clist.add(p[0])
+                    clist.add(p[0].replace('-1', ''))
+        clist.discard('normal')
+        names = set(e for c in counts for b in counts[c] for e in counts[c][b] if e in clist) | {'normal'}
+        cells = names - {'normal'}
 
     log('Computing total numbers of sequenced reads')
     total = reduce(inupdate, (Counter(counts[c][b]) for c in counts for b in counts[c]))
@@ -219,6 +233,38 @@ def extracting(job):
     sam = sp.Popen(shlex.split(cmd), stdout=sp.PIPE, stderr=sp.PIPE)
     stdout, stderr = sp.Popen(cmd_awk, stdin=sam.stdout, stdout=sp.PIPE, stderr=sp.PIPE).communicate()
     return (c, b, stdout.strip())
+
+
+def read_bins(f, chromosomes):
+    """Precomputed bins from a TSV/BED file whose first three columns are CHR START END
+    (0-based, half-open), e.g. Binner.py output or UGP's bb.tsv.gz. Lines starting with '#'
+    are headers. Chromosome names are matched with or without 'chr' and renamed to the given
+    chromosomes (i.e. the names in the BAM files)."""
+    import gzip
+    names = {c.replace('chr', '') : c for c in chromosomes}
+    bins = defaultdict(list)
+    op = gzip.open if f.endswith('.gz') else open
+    with op(f, 'r') as i:
+        for l in i:
+            if not isinstance(l, str):
+                l = l.decode('utf-8')
+            if l[0] != '#' and len(l.strip()) > 0:
+                p = l.strip().split('\t') if '\t' in l else l.strip().split()
+                if p[0].replace('chr', '') in names:
+                    try:
+                        s, e = int(p[1]), int(p[2])
+                    except ValueError:
+                        raise ValueError('Bins file must have columns CHR START END, found: {}'.format(l.strip()))
+                    if not s < e:
+                        raise ValueError('Found a bin with START >= END in {}: {}'.format(f, l.strip()))
+                    bins[names[p[0].replace('chr', '')]].append((s, e))
+    bins = {c : sorted(bins[c]) for c in bins}
+    for c in bins:
+        if any(p[1] > q[0] for p, q in zip(bins[c][:-1], bins[c][1:])):
+            raise ValueError('Found overlapping bins on {} in {}'.format(c, f))
+    if len(bins) == 0:
+        raise ValueError('No bin found in {} on the given chromosomes'.format(f))
+    return bins
 
 
 def get_bins(ref, chromosomes, bsize, bams=None, samtools=None):
