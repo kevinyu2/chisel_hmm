@@ -807,7 +807,11 @@ def summarize(bins, ncells):
     log('How bins closed: {}'.format(count('CLOSE')), level='INFO')
     log('Criteria deciding the boundaries: {}'.format(count('LIMIT')), level='INFO')
     rows = [['REGION', 'START', 'END', 'BINS', 'MEDIAN_SIZE', 'MIN_SIZE', 'MAX_SIZE', 'LIMITS']]
-    for r in sorted(set(b['REGION'] for b in bins), key=(lambda r : (orderchrs(r.rsplit('_', 1)[0]), int(r.rsplit('_', 1)[1])))):
+    first = {}
+    for b in bins:  # regions in genome order: by chromosome, then by their first bin (names can be anything, e.g. UGP's chr1q)
+        key = (orderchrs(b['CHR']), b['START'])
+        first[b['REGION']] = min(first.get(b['REGION'], key), key)
+    for r in sorted(first, key=lambda r : first[r]):
         rb = [b for b in bins if b['REGION'] == r]
         sz = [b['SIZE'] for b in rb]
         rows.append([r, str(min(b['START'] for b in rb)), str(max(b['END'] for b in rb)), str(len(rb)), str(int(np.median(sz))),

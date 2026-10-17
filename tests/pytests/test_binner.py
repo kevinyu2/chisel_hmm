@@ -134,3 +134,11 @@ def test_given_bins_keep_region_and_per_cell_snp_stats():
     finally:
         os.remove(f)
         os.remove(b.name)
+
+
+def test_summary_accepts_text_region_ids():
+    # UGP's real bb.tsv.gz has region_id chr1p / chr1q (regression: the summary assumed numbers)
+    from chisel.Binner import summarize
+    bins = [{'CHR': 'chr1', 'START': s, 'END': e, 'SIZE': e - s, 'REGION': r, 'SNP_READS': 10, 'SNP_READS_MIN_CELL': 1,
+             'CLOSE': 'given', 'LIMIT': 'given'} for s, e, r in [(200, 300, 'chr1_chr1q'), (0, 100, 'chr1_chr1p')]]
+    summarize(bins, 1)
