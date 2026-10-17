@@ -217,6 +217,7 @@ def main():
         if args['cellsuffix'] is not None:
             cmd += " --cellsuffix {}".format(args['cellsuffix'])
         cmd += " --windows {}".format(os.path.join(dbin, 'windows.tsv.gz'))
+        cmd += " --summary {}".format(os.path.join(dbin, 'bins.summary.tsv'))
         runcmd(cmd, dbin, out='bins.tsv', log='log_binning')
         fbins = os.path.join(dbin, 'bins.tsv')
         if not os.path.isfile(fbins) or os.path.getsize(fbins) == 0:

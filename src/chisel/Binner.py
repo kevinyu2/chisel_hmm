@@ -84,6 +84,7 @@ def parse_args(args):
     parser.add_argument("--blacklist", type=str, required=False, default=None, help="BED file of regions to exclude; regions are split at excluded intervals (default: none)")
     parser.add_argument("--keepsnpfree", required=False, default=False, action='store_true', help="Keep bins without any SNP, which only occur when a whole region misses the criteria (default: such bins are dropped, as in UGP)")
     parser.add_argument("--given", type=str, required=False, default=None, help="Do not compute bins but describe these precomputed bins (TSV/BED with columns CHR START END, e.g. UGP's bb.tsv.gz; a region_id column is kept); thresholds and regions are then ignored (default: compute bins)")
+    parser.add_argument("--summary", type=str, required=False, default=None, help="Also write the number of bins and their mean and median size to this TSV (default: not written)")
     parser.add_argument("--windows", type=str, required=False, default=None, help="Write the per-window trace (counts and assigned bin of every window) to this file, gzipped if it ends with .gz; it is the input of BinPlotter.py (default: not written)")
     parser.add_argument("--notrim", required=False, default=False, action='store_true', help="Do not trim windows without normal reads (e.g. assembly gaps, telomeres) from the ends of every region (default: trimming enabled)")
     parser.add_argument("-s","--samtools", required=False, default=None, type=str, help="Path to the directory to \"samtools\" executable (default: samtools in $PATH)")
@@ -151,6 +152,7 @@ def parse_args(args):
         'keepsnpfree' : args.keepsnpfree,
         'trim' : not args.notrim,
         'windows' : args.windows,
+        'summary' : args.summary,
         'given' : args.given,
         'samtools' : samtools,
         'j' : args.jobs,
@@ -223,6 +225,8 @@ def main(args=None, stdout_file=None):
 
     log('Writing bins')
     write_bins(bins, meta, stdout_file)
+    if args['summary'] is not None:
+        write_summary(bins, args['summary'])
     if args['windows'] is not None:
         log('Writing per-window trace to {}'.format(args['windows']))
         write_windows(windows, meta, args['windows'])
@@ -769,6 +773,12 @@ def write_bins(bins, meta, stdout_file=None):
             o.write('\n'.join(lines) + '\n')
     else:
         sys.stdout.write('\n'.join(lines) + '\n')
+
+
+def write_summary(bins, f):
+    sizes = np.array([b['END'] - b['START'] for b in bins], dtype=np.float64)
+    with open(f, 'w') as o:
+        o.write('BINS\tMEAN_SIZE\tMEDIAN_SIZE\n{}\t{:.0f}\t{:.0f}\n'.format(len(bins), sizes.mean(), np.median(sizes)))
 
 
 def write_windows(windows, meta, f):
