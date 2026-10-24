@@ -38,6 +38,7 @@ def parse_args(args):
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: none)")
     parser.add_argument("--clustering", required=False, type=str, default='kmedians', choices=['kmedians', 'hmm'], help="Global clustering of bins: CHISEL's k-medians on RDR and mirrored BAF (default), or a HATCHet2-style Gaussian HMM along the genome (options --hmm*)")
     hmm = parser.add_argument_group('HMM clustering (--clustering hmm)', 'Locality-aware clustering as in HATCHet2 cluster_bins: one Gaussian state per cluster over the BAF and RDR of every sample, sticky transitions along every chromosome/arm, K chosen by BIC or silhouette (see HMMClusterizer.py)')
+    hmm.add_argument("--hmmk", type=int, default=None, help="Use exactly this number of clusters (sets --hmmmink and --hmmmaxk)")
     hmm.add_argument("--hmmmink", type=int, default=5, help="Smallest number of clusters (default: 5)")
     hmm.add_argument("--hmmmaxk", type=int, default=30, help="Largest number of clusters (default: 30)")
     hmm.add_argument("--hmmselect", type=str, default='bic', choices=['bic', 'silhouette'], help="Choose K by BIC (lowest) or silhouette (highest) (default: bic)")
@@ -79,6 +80,8 @@ def parse_args(args):
         args.jobs = mp.cpu_count()
     if args.jobs < 1:
         raise ValueError("The number of jobs must be positive!")
+    if args.hmmk is not None:
+        args.hmmmink = args.hmmmaxk = args.hmmk
     if args.clustering == 'hmm':
         if args.hmmmink < 1 or args.hmmmaxk < args.hmmmink:
             raise ValueError("HMM clusters need 1 <= --hmmmink <= --hmmmaxk!")

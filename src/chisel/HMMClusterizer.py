@@ -625,6 +625,47 @@ def relabel_by_position(labels):
 # ============================================================================================
 # 5. Entry points: Caller (--clustering hmm) and chisel_hmmstates
 # ============================================================================================
+def add_driver_arguments(parser):
+    """The --hmm options of the chisel and chisel_calling commands (passed on to Caller)."""
+    hm = parser.add_argument_group('HMM bin clustering', 'Replace the k-medians clustering of bins in the calling step by a HATCHet2-style Gaussian HMM along the genome (Caller --clustering hmm); the per-K model selection is written to calls/hmm_selection.tsv')
+    hm.add_argument("--hmm", required=False, default=False, action='store_true', help="Cluster bins with the HMM (default: disabled, k-medians)")
+    hm.add_argument("--hmmk", type=int, required=False, default=None, help="Use exactly this number of clusters (sets --hmmmink and --hmmmaxk)")
+    hm.add_argument("--hmmselect", type=str, required=False, default='bic', choices=list(CRITERIA), help="Choose the number of clusters by BIC or silhouette (default: bic)")
+    hm.add_argument("--hmmmink", type=int, required=False, default=5, help="Smallest number of clusters (default: 5)")
+    hm.add_argument("--hmmmaxk", type=int, required=False, default=30, help="Largest number of clusters (default: 30)")
+    hm.add_argument("--hmmrestarts", type=int, required=False, default=10, help="Restarts per number of clusters (default: 10)")
+    hm.add_argument("--hmmtau", type=float, required=False, default=1e-6, help="Initial probability of moving to another state (default: 1e-6)")
+    hm.add_argument("--hmmdecode", type=str, required=False, default='map', choices=list(DECODINGS), help="Decoding (default: map)")
+    hm.add_argument("--hmmtransmat", type=str, required=False, default='diag', choices=list(TRANSMATS), help="Transitions (default: diag)")
+    hm.add_argument("--hmmbaf", type=str, required=False, default='oriented', choices=list(BAFS), help="BAF used by the HMM (default: oriented)")
+    hm.add_argument("--hmmgroups", type=str, required=False, default=None, help="CELL GROUP per line: cluster on pseudobulk groups of cells (default: every cell)")
+    return hm
+
+
+def driver_options(args):
+    """Checked HMM options of a driver's parsed arguments -> dict for caller_flags (None without --hmm)."""
+    if args.hmmk is not None:
+        args.hmmmink = args.hmmmaxk = args.hmmk
+    if not args.hmm:
+        return None
+    if not 1 <= args.hmmmink <= args.hmmmaxk:
+        raise ValueError("HMM clusters need 1 <= --hmmmink <= --hmmmaxk!")
+    if args.hmmgroups is not None and not os.path.isfile(args.hmmgroups):
+        raise ValueError("HMM groups file does not exist: {}".format(args.hmmgroups))
+    return {'hmmselect': args.hmmselect, 'hmmmink': args.hmmmink, 'hmmmaxk': args.hmmmaxk,
+            'hmmrestarts': args.hmmrestarts, 'hmmtau': args.hmmtau, 'hmmdecode': args.hmmdecode,
+            'hmmtransmat': args.hmmtransmat, 'hmmbaf': args.hmmbaf,
+            'hmmgroups': os.path.abspath(args.hmmgroups) if args.hmmgroups else None}
+
+
+def caller_flags(opts, report):
+    """Caller command-line flags for driver_options' dict, writing the selection table to report."""
+    if not opts:
+        return ''
+    return " --clustering hmm --hmmreport {}".format(report) + ''.join(
+        " --{} {}".format(k, v) for k, v in sorted(opts.items()) if v is not None)
+
+
 def hmm_clustering(bins, cells, pos, par):
     """Caller hook: cluster of every bin (list in the order of pos) with the HMM."""
     data = from_caller(bins, cells, pos)

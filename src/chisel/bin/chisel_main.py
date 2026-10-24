@@ -11,6 +11,7 @@ import chisel
 
 src = os.path.dirname(chisel.__file__)
 from ..Utils import *
+from ..HMMClusterizer import add_driver_arguments, driver_options, caller_flags
 
 
 def parse_args():
@@ -47,17 +48,7 @@ def parse_args():
     vb.add_argument("--regions", type=str, required=False, default=None, help="BED file of regions that bins cannot span (default: chromosome arms of --refversion)")
     vb.add_argument("--refversion", type=str, required=False, default='auto', choices=['auto', 'hg19', 'hg38', 'none'], help="Reference version for chromosome arms (default: auto-detected from chr1 length)")
     vb.add_argument("--blacklist", type=str, required=False, default=None, help="BED file of regions to exclude from bins (default: none)")
-    hm = parser.add_argument_group('HMM bin clustering', 'Replace the k-medians clustering of bins in the calling step by a HATCHet2-style Gaussian HMM along the genome (Caller --clustering hmm); the per-K model selection is written to calls/hmm_selection.tsv')
-    hm.add_argument("--hmm", required=False, default=False, action='store_true', help="Cluster bins with the HMM (default: disabled, k-medians)")
-    hm.add_argument("--hmmselect", type=str, required=False, default='bic', choices=['bic', 'silhouette'], help="Choose the number of clusters by BIC or silhouette (default: bic)")
-    hm.add_argument("--hmmmink", type=int, required=False, default=5, help="Smallest number of clusters (default: 5)")
-    hm.add_argument("--hmmmaxk", type=int, required=False, default=30, help="Largest number of clusters (default: 30)")
-    hm.add_argument("--hmmrestarts", type=int, required=False, default=10, help="Restarts per number of clusters (default: 10)")
-    hm.add_argument("--hmmtau", type=float, required=False, default=1e-6, help="Initial probability of moving to another state (default: 1e-6)")
-    hm.add_argument("--hmmdecode", type=str, required=False, default='map', choices=['map', 'viterbi'], help="Decoding (default: map)")
-    hm.add_argument("--hmmtransmat", type=str, required=False, default='diag', choices=['diag', 'fixed', 'free'], help="Transitions (default: diag)")
-    hm.add_argument("--hmmbaf", type=str, required=False, default='oriented', choices=['oriented', 'mirrored'], help="BAF used by the HMM (default: oriented)")
-    hm.add_argument("--hmmgroups", type=str, required=False, default=None, help="CELL GROUP per line: cluster on pseudobulk groups of cells (default: every cell)")
+    add_driver_arguments(parser)
     args = parser.parse_args()
 
     if not os.path.isdir(args.rundir):
@@ -78,10 +69,7 @@ def parse_args():
         raise ValueError("The maximum total copy number to consider for balanced cluster must be at least 2!")
     if args.upperk < 1:
         raise ValueError("The maximum number of clusters must be positive!")
-    if args.hmm and not 1 <= args.hmmmink <= args.hmmmaxk:
-        raise ValueError("HMM clusters need 1 <= --hmmmink <= --hmmmaxk!")
-    if args.hmmgroups is not None and not os.path.isfile(args.hmmgroups):
-        raise ValueError("HMM groups file does not exist: {}".format(args.hmmgroups))
+    hmmopts = driver_options(args)
     if args.bins is not None and args.varbins:
         raise ValueError("Use either --bins (precomputed bins) or --varbins (bins computed by CHISEL), not both!")
     if args.bins is not None:
@@ -165,11 +153,7 @@ def parse_args():
         "regions" : args.regions,
         "refversion" : args.refversion,
         "blacklist" : args.blacklist,
-        "hmm" : args.hmm,
-        "hmmopts" : {'hmmselect' : args.hmmselect, 'hmmmink' : args.hmmmink, 'hmmmaxk' : args.hmmmaxk,
-                     'hmmrestarts' : args.hmmrestarts, 'hmmtau' : args.hmmtau, 'hmmdecode' : args.hmmdecode,
-                     'hmmtransmat' : args.hmmtransmat, 'hmmbaf' : args.hmmbaf,
-                     'hmmgroups' : os.path.abspath(args.hmmgroups) if args.hmmgroups else None}
+        "hmmopts" : hmmopts
     }
 
 
@@ -281,9 +265,7 @@ def main():
     cmd = cmd.format(get_comp('Caller.py'), com, args['maxploidy'], args['upperk'], args['jobs'])
     if args['seed'] is not None:
         cmd += " --seed {}".format(args['seed'])
-    if args['hmm']:
-        cmd += " --clustering hmm --hmmreport {}".format(os.path.join(dcal, 'hmm_selection.tsv'))
-        cmd += ''.join(" --{} {}".format(k, v) for k, v in sorted(args['hmmopts'].items()) if v is not None)
+    cmd += caller_flags(args['hmmopts'], os.path.join(dcal, 'hmm_selection.tsv'))
     runcmd(cmd, dcal, out='calls.tsv')
     calls = os.path.join(dcal, 'calls.tsv')
 

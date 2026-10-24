@@ -12,6 +12,7 @@ import chisel
 
 src = os.path.dirname(chisel.__file__)
 from ..Utils import *
+from ..HMMClusterizer import add_driver_arguments, driver_options, caller_flags
 
 
 def parse_args():
@@ -24,7 +25,10 @@ def parse_args():
     parser.add_argument("-K","--upperk", required=False, type=int, default=100, help="Maximum number of bin clusters (default: 100, use 0 to consider maximum number of clusters)")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: None)")
     parser.add_argument("-j","--jobs", required=False, type=int, default=0, help="Number of parallele jobs to use (default: equal to number of available processors)")
+    parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Length-weighted distance between cells when cloning, as chisel uses with variable-length bins (--varbins/--bins) (default: disabled)")
+    add_driver_arguments(parser)
     args = parser.parse_args()
+    hmmopts = driver_options(args)
 
     if not os.path.isfile(args.INPUT):
         raise ValueError("Input file does not exist: {}".format(args.INPUT))
@@ -48,7 +52,9 @@ def parse_args():
         "maxploidy" : args.maxploidy,
         "upperk" : args.upperk,
         "seed" : args.seed,
-        "jobs" : args.jobs
+        "jobs" : args.jobs,
+        "weighted" : args.weighted,
+        "hmmopts" : hmmopts
     }
 
 
@@ -70,6 +76,7 @@ def main():
     cmd = cmd.format(get_comp('Caller.py'), args['INPUT'], args['sensitivity'], args['maxploidy'], args['upperk'], args['jobs'])
     if args['seed'] is not None:
         cmd += " --seed {}".format(args['seed'])
+    cmd += caller_flags(args['hmmopts'], os.path.join(dcal, 'hmm_selection.tsv'))
     runcmd(cmd, dcal, out='calls.tsv')
     calls = os.path.join(dcal, 'calls.tsv')
 
@@ -78,6 +85,8 @@ def main():
     cmd = cmd.format(get_comp('Cloner.py'), calls)
     if args['seed'] is not None:
         cmd += " --seed {}".format(args['seed'])
+    if args['weighted']:
+        cmd += " --weighted"
     runcmd(cmd, dclo, out='mapping.tsv')
     mapping = os.path.join(dclo, 'mapping.tsv')
 

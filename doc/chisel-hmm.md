@@ -13,6 +13,11 @@ chisel ... --hmm [--hmmselect bic|silhouette] [--hmmmink 5] [--hmmmaxk 30] [--hm
               [--hmmbaf oriented|mirrored] [--hmmgroups CELL_GROUPS.tsv]
 ```
 
+`--hmmk K` uses exactly K clusters. To redo only the calling on an existing run (from its
+`combo/combo.tsv`), `chisel_calling` takes the same options, plus `--weighted` for the
+length-weighted cloning that `chisel` uses with variable-length bins:
+`chisel_calling RUN/combo/combo.tsv -x NEWRUN -P 3 -K 100 --weighted --hmm --hmmk 7`.
+
 `calls/hmm_selection.tsv` gets the per-K table (criterion, log-likelihood, decoding score, states used,
 stay probability, number of parameters, restart kept; `*` = chosen). Caller alone:
 `python2.7 Caller.py combo.tsv --clustering hmm --hmm... --hmmreport FILE`.
