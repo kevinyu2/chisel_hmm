@@ -419,3 +419,34 @@ def test_caller_with_hmm_clustering_end_to_end():
     with open(report) as f:
         rows = [l.split('\t') for l in f if not l.startswith('K')]
     assert [int(r[0]) for r in rows] == [2, 3, 4, 5] and sum(r[-1].strip() == '*' for r in rows) == 1
+
+
+@pytest.mark.skipif(__import__('sys').version_info[0] >= 3, reason='Caller.py is Python 2.7 code')
+def test_caller_with_given_clusters():
+    from chisel.Caller import main as caller_main
+    tmp = tempfile.mkdtemp()
+    combo = os.path.join(tmp, 'combo.tsv')
+    truth = write_combo(combo)
+    given = os.path.join(tmp, 'clusters.tsv')
+    with open(given, 'w') as f:
+        f.write('#CHR\tSTART\tEND\tCLUSTER\n')
+        for chrom in ('chr1', 'chr2'):
+            for i in range(24):
+                name = 'gain' if (chrom == 'chr1' and 8 <= i < 16) else ('del' if (chrom == 'chr2' and 6 <= i < 12) else 'normal')
+                f.write('{}\t{}\t{}\t{}\n'.format(chrom, i * 1000000, (i + 1) * 1000000, name))
+    out = os.path.join(tmp, 'calls.tsv')
+    caller_main(args=[combo, '-j', '2', '--seed', '1', '--clusters', given], stdout_file=out)
+    clusters, ok = {}, []
+    with open(out) as f:
+        f.readline()
+        for line in f:
+            p = line.strip().split('\t')
+            i = int(p[1]) // 1000000
+            clusters[(p[0], i)] = int(p[10])
+            ok.append(sum(map(int, p[11].split('|'))) == sum(truth[(p[0], i, int(p[3][4:]))]))
+    assert clusters[('chr1', 0)] == 0 and clusters[('chr1', 8)] == 1 and clusters[('chr2', 6)] == 2   # numbered in genome order
+    assert len(set(clusters.values())) == 3 and np.mean(ok) > 0.95
+    with open(given, 'a') as f:
+        f.write('chr1\t0\t1000000\tnormal\n')
+    with pytest.raises(ValueError):
+        caller_main(args=[combo, '--clusters', given], stdout_file=out)

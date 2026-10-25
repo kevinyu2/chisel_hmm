@@ -36,6 +36,7 @@ def parse_args(args):
     parser.add_argument("--fastscaling", required=False, default=False, action='store_true', help="Consider average BAF of clusters instead of EM (default: False, using it is generally safe and significantly increases speed)")
     #parser.add_argument("--scoring", required=False, default=False, action='store_true', help=" (default: equal to number of available processors)")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: none)")
+    parser.add_argument("--clusters", required=False, type=str, default=None, help="Take the bin clusters from this file instead of computing them: CHR START END CLUSTER per line (# comments allowed), every bin of the input exactly once; e.g. oracle clusters for diagnosis (default: none)")
     parser.add_argument("--clustering", required=False, type=str, default='kmedians', choices=['kmedians', 'hmm'], help="Global clustering of bins: CHISEL's k-medians on RDR and mirrored BAF (default), or a HATCHet2-style Gaussian HMM along the genome (options --hmm*)")
     hmm = parser.add_argument_group('HMM clustering (--clustering hmm)', 'Locality-aware clustering as in HATCHet2 cluster_bins: one Gaussian state per cluster over the BAF and RDR of every sample, sticky transitions along every chromosome/arm, K chosen by BIC or silhouette (see HMMClusterizer.py)')
     hmm.add_argument("--hmmk", type=int, default=None, help="Use exactly this number of clusters (sets --hmmmink and --hmmmaxk)")
@@ -80,6 +81,8 @@ def parse_args(args):
         args.jobs = mp.cpu_count()
     if args.jobs < 1:
         raise ValueError("The number of jobs must be positive!")
+    if args.clusters is not None and not os.path.isfile(args.clusters):
+        raise ValueError("Clusters file does not exist: {}".format(args.clusters))
     if args.hmmk is not None:
         args.hmmmink = args.hmmmaxk = args.hmmk
     if args.clustering == 'hmm':
@@ -114,6 +117,7 @@ def parse_args(args):
         'scoring' : False,
         'seed' : args.seed,
         'clustering' : args.clustering,
+        'clusters' : args.clusters,
         'hmm' : {'mink' : args.hmmmink, 'maxk' : args.hmmmaxk, 'criterion' : args.hmmselect, 'restarts' : args.hmmrestarts,
                  'tau' : args.hmmtau, 'transmat' : args.hmmtransmat, 'decode' : args.hmmdecode, 'baf' : args.hmmbaf,
                  'split' : args.hmmsplit, 'groups' : args.hmmgroups, 'bic_params' : args.hmmbicparams,
@@ -133,7 +137,11 @@ def main(args=None, stdout_file=None):
     log('Formatting RDRs and BAFs')
     data, mapb, cells = format_combo(bins)
 
-    if args['clustering'] == 'hmm':
+    if args['clusters'] is not None:
+        log('Reading the bin clusters from {}'.format(args['clusters']))
+        members = read_clusters(args['clusters'], mapb)
+        log('{} bins in {} given clusters'.format(len(members), len(set(members))), level='INFO')
+    elif args['clustering'] == 'hmm':
         log('Clustering globally with an HMM along the genome')
         from HMMClusterizer import hmm_clustering
         pos = sorted(mapb, key=(lambda b : mapb[b]))
@@ -182,6 +190,33 @@ def main(args=None, stdout_file=None):
         print header
         for g in gen:
             print g
+
+
+def read_clusters(path, mapb):
+    """CHR START END CLUSTER per bin -> list of integer cluster ids in the order of mapb."""
+    given = {}
+    with open(path, 'r') as i:
+        for l in i:
+            p = l.strip().split()
+            if not p or p[0].startswith('#'):
+                continue
+            if len(p) < 4:
+                raise ValueError("Clusters file needs CHR START END CLUSTER on every line: {}".format(l.strip()))
+            b = (p[0], int(p[1]), int(p[2]))
+            if b in given:
+                raise ValueError("Bin {}:{}-{} appears twice in the clusters file".format(*b))
+            given[b] = p[3]
+    missing = [b for b in mapb if b not in given]
+    if missing:
+        raise ValueError("{} bins of the input have no cluster in {} (e.g. {}:{}-{}); bins must match exactly".format(len(missing), path, *missing[0]))
+    ids = {}
+    members = [None] * len(mapb)
+    for b, idx in sorted(mapb.items(), key=(lambda x : x[1])):
+        c = given[b]
+        if c not in ids:
+            ids[c] = len(ids)
+        members[idx] = ids[c]
+    return members
 
 
 def read_combo(f):
