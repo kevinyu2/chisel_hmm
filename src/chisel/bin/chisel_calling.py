@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument("--clusters", required=False, type=str, default=None, help="Take the bin clusters from this file (CHR START END CLUSTER) instead of computing them, e.g. oracle clusters for diagnosis (default: none)")
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Length-weighted distance between cells when cloning, as chisel uses with variable-length bins (--varbins/--bins) (default: disabled)")
     add_driver_arguments(parser)
+    parser.add_argument("--cloning", required=False, type=str, default='hamming', choices=['hamming', 'divisive'], help="Grouping of cells into clones: hamming = CHISEL's clustering of the called states; divisive = top-down splitting on RDR and BAF with permutation-tested splits (Cloner.py --clustering divisive) (default: hamming)")
     args = parser.parse_args()
     hmmopts = driver_options(args)
     if args.clusters is not None:
@@ -61,6 +62,7 @@ def parse_args():
         "jobs" : args.jobs,
         "weighted" : args.weighted,
         "hmmopts" : hmmopts,
+        "cloning" : args.cloning,
         "clusters" : os.path.abspath(args.clusters) if args.clusters else None
     }
 
@@ -96,6 +98,8 @@ def main():
         cmd += " --seed {}".format(args['seed'])
     if args['weighted']:
         cmd += " --weighted"
+    if args['cloning'] != 'hamming':
+        cmd += " --clustering {}".format(args['cloning'])
     runcmd(cmd, dclo, out='mapping.tsv')
     mapping = os.path.join(dclo, 'mapping.tsv')
 

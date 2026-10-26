@@ -23,6 +23,8 @@ def parse_args():
     parser.add_argument("-s", "--minsize", required=False, type=int, default=14, help="Minimum number of cells in a subpopulation to define a clone (default: 14)")
     parser.add_argument("-r", "--refinement", required=False, type=float, default=None, help="Maximum difference to assign noisy cells to the closest clone (default: 0.0, note that 1.0 can be used to force the assigment of all cells)")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: None)")
+    parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Length-weighted differences between cells, as chisel uses with variable-length bins (default: disabled)")
+    parser.add_argument("--cloning", required=False, type=str, default='hamming', choices=['hamming', 'divisive'], help="Grouping of cells into clones: hamming = CHISEL's clustering of the called states (-f, -r); divisive = top-down splitting on RDR and BAF with permutation-tested splits (Cloner.py --clustering divisive; -s is the minimum clone size) (default: hamming)")
     args = parser.parse_args()
 
     if not os.path.isfile(args.INPUT):
@@ -42,7 +44,9 @@ def parse_args():
         "maxdiff" : args.maxdiff,
         "minsize" : args.minsize,
         "refinement" : args.refinement,
-        "seed" : args.seed
+        "seed" : args.seed,
+        "weighted" : args.weighted,
+        "cloning" : args.cloning
     }
 
 
@@ -66,6 +70,10 @@ def main():
         cmd += " -r {}".format(args['refinement'])
     if args['seed'] is not None:
         cmd += " --seed {}".format(args['seed'])
+    if args['weighted']:
+        cmd += " --weighted"
+    if args['cloning'] != 'hamming':
+        cmd += " --clustering {}".format(args['cloning'])
     runcmd(cmd, dclo, out='mapping.tsv')
     mapping = os.path.join(dclo, 'mapping.tsv')
 

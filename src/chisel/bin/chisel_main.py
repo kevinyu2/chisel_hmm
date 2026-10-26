@@ -49,6 +49,7 @@ def parse_args():
     vb.add_argument("--refversion", type=str, required=False, default='auto', choices=['auto', 'hg19', 'hg38', 'none'], help="Reference version for chromosome arms (default: auto-detected from chr1 length)")
     vb.add_argument("--blacklist", type=str, required=False, default=None, help="BED file of regions to exclude from bins (default: none)")
     add_driver_arguments(parser)
+    parser.add_argument("--cloning", required=False, type=str, default='hamming', choices=['hamming', 'divisive'], help="Grouping of cells into clones: hamming = CHISEL's clustering of the called states; divisive = top-down splitting on RDR and BAF with permutation-tested splits (Cloner.py --clustering divisive) (default: hamming)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.rundir):
@@ -153,7 +154,8 @@ def parse_args():
         "regions" : args.regions,
         "refversion" : args.refversion,
         "blacklist" : args.blacklist,
-        "hmmopts" : hmmopts
+        "hmmopts" : hmmopts,
+        "cloning" : args.cloning
     }
 
 
@@ -276,6 +278,8 @@ def main():
         cmd += " --seed {}".format(args['seed'])
     if args['varbins'] or args['givenbins']:
         cmd += " --weighted"
+    if args['cloning'] != 'hamming':
+        cmd += " --clustering {}".format(args['cloning'])
     runcmd(cmd, dclo, out='mapping.tsv')
     mapping = os.path.join(dclo, 'mapping.tsv')
 

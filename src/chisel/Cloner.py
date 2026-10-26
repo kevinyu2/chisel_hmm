@@ -28,6 +28,19 @@ def parse_args(args):
     parser.add_argument("-l", "--linkage", required=False, type=str, default='weighted', help="Linkage method to use for the hierarchical clustering (default: weighted, it must be a valid linkage method available in SciPy when using a non-euclidean distance, i.e. 'single', 'complete', 'average', 'weighted')")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: none)")
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Weight every bin by its length when measuring differences between cells, so that --maxdiff and --refinement are fractions of the genome also with variable-length bins (default: disabled, every bin has the same weight)")
+    parser.add_argument("--clustering", required=False, type=str, default='hamming', choices=['hamming', 'divisive'], help="How cells are grouped: hamming = CHISEL's hierarchical clustering of the called copy-number states (-f, -l, -r); divisive = top-down splitting on the cells' RDR and BAF with permutation-tested splits (see CellClusterer.py; -s is the minimum clone size) (default: hamming)")
+    dv = parser.add_argument_group('divisive clustering (--clustering divisive)')
+    dv.add_argument("--rdrweight", type=float, default=0.5, help="Weight of RDR vs BAF (1 - w) in the cell distances (default: 0.5)")
+    dv.add_argument("--noisescale", default=False, action='store_true', help="Express RDR and BAF in units of their expected counting noise (default: disabled)")
+    dv.add_argument("--perm", type=int, default=20, help="Permutations per split test (default: 20)")
+    dv.add_argument("--permq", type=float, default=95.0, help="Noise floor = this percentile of the permuted top PC variance (default: 95)")
+    dv.add_argument("--floormargin", type=float, default=1.5, help="A signal PC must exceed the noise floor by this factor (default: 1.5)")
+    dv.add_argument("--ashman", type=float, default=2.0, help="Minimum Ashman's D between the two halves of a split (default: 2)")
+    dv.add_argument("--peel", type=int, default=5, help="Times to set aside small outlier groups and retry a split (default: 5)")
+    dv.add_argument("--maxclones", type=int, default=30, help="Stop splitting at this many clusters (default: 30)")
+    dv.add_argument("--noreassign", default=False, action='store_true', help="Keep the split tree's assignment, no final reassignment (default: disabled)")
+    dv.add_argument("--outlierz", type=float, default=5.0, help="Set apart cells whose noise level is more than this many robust SDs above the typical cell (0 = off) (default: 5)")
+    dv.add_argument("--assignoutliers", default=False, action='store_true', help="Give the noisy cells set apart the nearest clone (default: disabled, they keep their own calls, clone None)")
     args = parser.parse_args(args)
 
     if not os.path.isfile(args.INPUT):
@@ -42,6 +55,11 @@ def parse_args(args):
         raise ValueError('ERROR: the minimum size of subpopulations must be positive!')
     if not args.linkage in {'single', 'complete', 'average', 'weighted'}:
         raise ValueError('ERROR: the linkage method is invalid or not available for non-euclidean distances!')
+    if args.clustering == 'divisive':
+        if not 0.0 <= args.rdrweight <= 1.0:
+            raise ValueError('ERROR: --rdrweight must be within [0, 1]!')
+        if args.perm < 1 or not 0 < args.permq <= 100 or args.floormargin <= 0 or args.maxclones < 1:
+            raise ValueError('ERROR: invalid divisive clustering parameters!')
     if args.seed and args.seed < 0:
         raise ValueError("Random seed must be positive or zero!")
     else:
@@ -54,7 +72,12 @@ def parse_args(args):
         'minsize' : args.minsize,
         'linkage' : args.linkage,
         'seed' : args.seed,
-        'weighted' : args.weighted
+        'weighted' : args.weighted,
+        'clustering' : args.clustering,
+        'divisive' : {'rdr_weight' : args.rdrweight, 'noise_scale' : args.noisescale, 'n_perm' : args.perm, 'q' : args.permq,
+                      'margin' : args.floormargin, 'ashman' : args.ashman, 'peel' : args.peel,
+                      'max_clusters' : args.maxclones, 'reassign' : not args.noreassign,
+                      'outlier_z' : args.outlierz, 'assign_outliers' : args.assignoutliers}
     }
 
 
@@ -68,13 +91,16 @@ def main(args=None, stdout_file=None):
 
     log('Clustering cells in clones')
     weights = binweights(pos) if args['weighted'] else None
-    clus = clustering(cns, pos, cells, args['maxdiff'], args['linkage'], weights)
+    if args['clustering'] == 'divisive':
+        clus = divisive_clustering(args['input'], cells, args['minsize'], args['seed'], args['divisive'])
+    else:
+        clus = clustering(cns, pos, cells, args['maxdiff'], args['linkage'], weights)
 
     log('Selecting clones')
     clones = selecting(clus, args['minsize'])
     log('Number of identified clones: {}'.format(len(set(clones.values()))), level='INFO')
 
-    if len(clones) > 0 and args['refinement'] >= 0.0:
+    if len(clones) > 0 and args['refinement'] >= 0.0 and args['clustering'] != 'divisive':
         log('Refining clustering')
         clones, clus = refining(cns, clus, clones, args['refinement'], weights)
     log('Number of discarded cells: {} over {} in total'.format(len(set(cells) - set(clones.keys())), len(set(cells))), level='INFO')
@@ -146,6 +172,33 @@ def clustering(cns, pos, cells, maxdiff, linkage, weights=None):
     else:
         clus = hier.fcluster(linkage, t=len(cells), criterion='maxclust')
     return {e : clus[i] for i, e in enumerate(cells)}
+
+
+def divisive_clustering(path, cells, minsize, seed, opts):
+    """Cells grouped top-down on their RDR and BAF (CellClusterer.divisive) -> {cell : cluster id from 1}."""
+    from CellClusterer import read_features, feature_matrix, divisive
+    fcells, bins, arr = read_features(path)
+    assert list(fcells) == list(cells), 'cells of the features and of the calls differ'
+    X = feature_matrix(arr, rdr_weight=opts['rdr_weight'], noise_scale=opts['noise_scale'])
+    log('Divisive clustering of {} cells on {} features ({} bins x RDR and BAF)'.format(X.shape[0], X.shape[1], len(bins)), level='INFO')
+    labels, steps = divisive(X, np.random.RandomState(seed if seed is not None else 0), min_size=minsize,
+                             n_perm=opts['n_perm'], q=opts['q'], margin=opts['margin'], ashman=opts['ashman'],
+                             peel=opts['peel'], max_clusters=opts['max_clusters'], reassign=opts['reassign'],
+                             outlier_z=opts['outlier_z'])
+    log('Divisive splits:\n' + '\n'.join(steps), level='INFO')
+    noisy = np.flatnonzero(labels < 0)
+    if len(noisy) and opts['assign_outliers'] and (labels >= 0).any():
+        cen = np.array([X[labels == k].mean(0) for k in range(labels.max() + 1)])
+        labels[noisy] = ((X[noisy][:, None, :] - cen[None, :, :]) ** 2).sum(2).argmin(1)
+        log('{} noisy cells given the nearest clone'.format(len(noisy)), level='INFO')
+    clus, nxt = {}, labels.max() + 2
+    for i, e in enumerate(fcells):
+        if labels[i] >= 0:
+            clus[e] = int(labels[i]) + 1
+        else:                                            # noisy cell: a cluster of its own (clone None, own calls)
+            clus[e] = nxt
+            nxt += 1
+    return clus
 
 
 def selecting(clus, minsize):
