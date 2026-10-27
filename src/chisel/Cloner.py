@@ -39,6 +39,7 @@ def parse_args(args):
     dv.add_argument("--peel", type=int, default=5, help="Times to set aside small outlier groups and retry a split (default: 5)")
     dv.add_argument("--maxclones", type=int, default=30, help="Stop splitting at this many clusters (default: 30)")
     dv.add_argument("--noreassign", default=False, action='store_true', help="Keep the split tree's assignment, no final reassignment (default: disabled)")
+    dv.add_argument("--features", type=int, default=200, help="Features (bins x RDR/BAF) used per split: the group's most variable ones in noise units, chosen again in every group (0 = all) (default: 200)")
     dv.add_argument("--outlierz", type=float, default=5.0, help="Set apart cells whose noise level is more than this many robust SDs above the typical cell (0 = off) (default: 5)")
     dv.add_argument("--assignoutliers", default=False, action='store_true', help="Give the noisy cells set apart the nearest clone (default: disabled, they keep their own calls, clone None)")
     args = parser.parse_args(args)
@@ -77,7 +78,7 @@ def parse_args(args):
         'divisive' : {'rdr_weight' : args.rdrweight, 'noise_scale' : args.noisescale, 'n_perm' : args.perm, 'q' : args.permq,
                       'margin' : args.floormargin, 'ashman' : args.ashman, 'peel' : args.peel,
                       'max_clusters' : args.maxclones, 'reassign' : not args.noreassign,
-                      'outlier_z' : args.outlierz, 'assign_outliers' : args.assignoutliers}
+                      'outlier_z' : args.outlierz, 'assign_outliers' : args.assignoutliers, 'n_features' : args.features}
     }
 
 
@@ -176,7 +177,7 @@ def clustering(cns, pos, cells, maxdiff, linkage, weights=None):
 
 def divisive_clustering(path, cells, minsize, seed, opts):
     """Cells grouped top-down on their RDR and BAF (CellClusterer.divisive) -> {cell : cluster id from 1}."""
-    from CellClusterer import read_features, feature_matrix, divisive
+    from CellClusterer import read_features, feature_matrix, noise_matrix, divisive
     fcells, bins, arr = read_features(path)
     assert list(fcells) == list(cells), 'cells of the features and of the calls differ'
     X = feature_matrix(arr, rdr_weight=opts['rdr_weight'], noise_scale=opts['noise_scale'])
@@ -184,7 +185,8 @@ def divisive_clustering(path, cells, minsize, seed, opts):
     labels, steps = divisive(X, np.random.RandomState(seed if seed is not None else 0), min_size=minsize,
                              n_perm=opts['n_perm'], q=opts['q'], margin=opts['margin'], ashman=opts['ashman'],
                              peel=opts['peel'], max_clusters=opts['max_clusters'], reassign=opts['reassign'],
-                             outlier_z=opts['outlier_z'])
+                             outlier_z=opts['outlier_z'], Z=noise_matrix(arr) if opts['n_features'] else None,
+                             n_features=opts['n_features'])
     log('Divisive splits:\n' + '\n'.join(steps), level='INFO')
     noisy = np.flatnonzero(labels < 0)
     if len(noisy) and opts['assign_outliers'] and (labels >= 0).any():

@@ -8,6 +8,15 @@ units of expected counting noise (Poisson on the cell's and the normal's reads f
 the cell's SNP reads for BAF). The RDR block and the BAF block are scaled to total variance 1 and
 weighted rdr_weight : 1 - rdr_weight, so within a block bins keep their own variance.
 
+Per-group feature selection (n_features > 0, needs the noise matrix Z: every value in units of its
+expected counting noise, see noise_matrix): before every split, only the n_features features whose
+variance in Z within the group is largest are used. A feature whose cells all agree has variance
+about 1 in Z; the bins of an event that some of the group's cells carry vary more. With thousands of
+features and few cells, the noise floor of the top PC grows with the number of features, so a
+difference over a few bins (e.g. 1 Mb in 100-kb bins) is invisible to PCA on all features but clear
+on the selected ones. The features are chosen again in every group, so nested differences each get
+their turn. The permutation test stays valid: shuffling keeps every selected feature's variance.
+
 Starting from all cells, a group is split in two when all of these hold:
   * signal: PCA of the group's own cells has at least one PC whose variance beats a noise floor by
     floor_margin, the floor being the perm_q percentile of the top PC variance over perm matrices in
@@ -27,7 +36,8 @@ outlier_z robust SDs above the typical level are left out of the splits, the noi
 reassignment (label -1). Noisy cells inside a group would otherwise raise its noise floor and hide a
 clone, and drag cluster centres.
 Groups that do not split are the clusters; finally every cell is reassigned to the nearest cluster
-centre in the top PCs of all cells, repeated until stable (corrects cells sent the wrong way by an
+centre in the top PCs of all cells (with feature selection: of the features used by the accepted
+splits), repeated until stable (corrects cells sent the wrong way by an
 early split). Re-running PCA inside every group lets small differences become the main signal once
 large ones are separated, which suits nested (tree-like) clones and clones that differ by the same
 segment at different copy numbers.
@@ -82,6 +92,22 @@ def feature_matrix(arr, rdr_weight=0.5, noise_scale=False):
     tr = max((R ** 2).sum() / R.shape[0], 1e-12)
     tb = max((B ** 2).sum() / B.shape[0], 1e-12)
     return np.hstack([R * np.sqrt(rdr_weight / tr), B * np.sqrt((1.0 - rdr_weight) / tb)])
+
+
+def noise_matrix(arr):
+    """cells x (RDR bins + BAF bins), centred per bin, in units of expected counting noise (Poisson on the
+    cell's and the normal's reads for RDR, binomial on the cell's SNP reads for BAF); missing -> 0."""
+    rdr, n = arr['rdr'], arr['a'] + arr['b']
+    with np.errstate(invalid='ignore', divide='ignore'):
+        baf = np.where(n > 0, arr['b'] / np.where(n > 0, n, 1.0), np.nan)
+        cnt, nrm = arr['count'], np.maximum(arr['norm'], 1.0)
+        rsd = np.sqrt(rdr ** 2 * (1.0 / np.where(cnt > 0, cnt, np.nan) + 1.0 / nrm))
+        p = np.clip(np.nansum(arr['b'], axis=0) / np.maximum(np.nansum(n, axis=0), 1.0), 0.01, 0.99)
+        bsd = np.sqrt(p * (1 - p) / np.where(n > 0, n, np.nan))
+        R = (rdr - np.nanmean(rdr, axis=0)) / rsd
+        B = (baf - np.nanmean(baf, axis=0)) / bsd
+    Z = np.hstack([R, B])
+    return np.where(np.isfinite(Z), Z, 0.0)
 
 
 def kmeans(X, K, rng, n_init=20, iters=300):
@@ -210,21 +236,34 @@ def noisy_cells(X, z=5.0):
 
 
 def divisive(X, rng, min_size=14, n_perm=20, q=95.0, margin=1.5, ashman=2.0, peel=5, max_clusters=30, reassign=True,
-             outlier_z=5.0):
+             outlier_z=5.0, Z=None, n_features=0):
     """Top-down clustering of the rows of X -> (labels 0..K-1, -1 for noisy cells set apart; log lines)."""
     log = []
     noisy = noisy_cells(X, outlier_z) if outlier_z > 0 else np.zeros(X.shape[0], dtype=bool)
     if noisy.any():
         log.append('{} very noisy cells set apart (noise level > {:g} robust SDs above the typical cell)'.format(int(noisy.sum()), outlier_z))
     keep = np.flatnonzero(~noisy)
-    labels, steps = _divisive(X[keep], rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign)
+    if n_features and Z is None:
+        raise ValueError('feature selection needs the noise matrix Z')
+    labels, steps = _divisive(X[keep], rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign,
+                              None if Z is None else Z[keep], n_features)
     full = np.full(X.shape[0], -1, dtype=int)
     full[keep] = labels
     return full, log + steps
 
 
-def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign):
-    leaves, queue, log = [], [(np.arange(X.shape[0]), 'root', 0)], []
+def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign, Z=None, n_features=0):
+    leaves, queue, log, used = [], [(np.arange(X.shape[0]), 'root', 0)], [], set()
+    select = n_features and 0 < n_features < X.shape[1]
+
+    def features(cells):
+        """The group's n_features most variable features in noise units (all features without selection)."""
+        if not select:
+            return np.arange(X.shape[1]), ''
+        disp = Z[cells].var(axis=0)
+        f = np.sort(np.argsort(-disp)[:n_features])
+        return f, ', top {} features (noise-unit variance {:.2g}-{:.2g}, median of all {:.2g})'.format(
+            n_features, disp[f].min(), disp[f].max(), np.median(disp))
     while queue:
         idx, name, depth = queue.pop(0)
         pad = '  ' * depth
@@ -238,9 +277,10 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
             if len(core) < 2 * min_size:
                 verdict = '{} cells left after setting aside {} outliers -> cluster'.format(len(core), len(peeled))
                 break
-            m, scores, var, floor = signal_pcs(X[core], rng, n_perm, q, margin)
+            feats, fnote = features(core)
+            m, scores, var, floor = signal_pcs(X[np.ix_(core, feats)], rng, n_perm, q, margin)
             if m == 0:
-                verdict = 'PC1 variance {:.3g} vs noise floor {:.3g}: no signal PC -> cluster'.format(var[0], floor)
+                verdict = 'PC1 variance {:.3g} vs noise floor {:.3g}: no signal PC{} -> cluster'.format(var[0], floor, fnote)
                 break
             if m == 1:
                 y = scores[:, 0]
@@ -253,8 +293,8 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
                     y = scores[:, :m].dot((c1 - c0) / max(np.linalg.norm(c1 - c0), 1e-12))
             lab, info = mode_split(y, ashman)
             if lab is None:
-                verdict = ("{} signal PC(s) (PC1 {:.3g} vs floor {:.3g}) but {} -> cluster").format(
-                    m, var[0], floor, 'one mode (BIC)' if info['k'] == 1 else
+                verdict = ("{} signal PC(s) (PC1 {:.3g} vs floor {:.3g}{}) but {} -> cluster").format(
+                    m, var[0], floor, fnote, 'one mode (BIC)' if info['k'] == 1 else
                     "{} modes, none apart (largest Ashman's D {:.2f})".format(info['k'], info['D']))
                 break
             sizes = np.bincount(lab, minlength=2)
@@ -263,7 +303,7 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
                 peeled = np.concatenate([peeled, core[lab == small]])
                 core = core[lab != small]
                 continue
-            split = (lab, m, var, floor, info['k'], info['D'])
+            split = (lab, m, var, floor, info['k'], info['D'], feats, fnote)
             break
         else:
             verdict = 'still cutting off < {} cells after {} retries -> cluster'.format(min_size, peel)
@@ -272,14 +312,15 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
             log.append('{}{}: {} cells, {}{}'.format(pad, name, len(idx), verdict, note))
             leaves.append(idx)
             continue
-        lab, m, var, floor, nmodes, dd = split
+        lab, m, var, floor, nmodes, dd, feats, fnote = split
+        used.update(feats.tolist())
         halves = [core[lab == 0], core[lab == 1]]
         if len(peeled):
-            cen = [X[h].mean(0) for h in halves]
-            near = np.argmin([((X[peeled] - c) ** 2).sum(1) for c in cen], axis=0)
+            cen = [X[np.ix_(h, feats)].mean(0) for h in halves]
+            near = np.argmin([((X[np.ix_(peeled, feats)] - c) ** 2).sum(1) for c in cen], axis=0)
             halves = [np.concatenate([halves[k], peeled[near == k]]) for k in (0, 1)]
-        log.append("{}{}: {} cells, {} signal PC(s) (PC1 {:.3g} vs floor {:.3g}), {} modes, cut at the widest gap "
-                   "(Ashman's D {:.2f}) -> split {} / {}{}".format(pad, name, len(idx), m, var[0], floor, nmodes, dd,
+        log.append("{}{}: {} cells, {} signal PC(s) (PC1 {:.3g} vs floor {:.3g}{}), {} modes, cut at the widest gap "
+                   "(Ashman's D {:.2f}) -> split {} / {}{}".format(pad, name, len(idx), m, var[0], floor, fnote, nmodes, dd,
                                                                 len(halves[0]), len(halves[1]), note))
         queue.append((halves[0], name + '.0', depth + 1))
         queue.append((halves[1], name + '.1', depth + 1))
@@ -287,7 +328,8 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
     for i, idx in enumerate(leaves):
         labels[idx] = i
     if reassign and len(leaves) > 1:
-        Xc = X - X.mean(axis=0)
+        cols = np.array(sorted(used)) if select and used else np.arange(X.shape[1])
+        Xc = X[:, cols] - X[:, cols].mean(axis=0)
         U, S, _ = np.linalg.svd(Xc, full_matrices=False)
         k = min(max(20, len(leaves)), len(S))
         P = U[:, :k] * S[:k]
@@ -300,6 +342,7 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
                 break
             moves += moved
             labels = np.searchsorted(np.unique(new), new)          # drop emptied clusters
-        log.append('reassignment to the nearest cluster centre (top {} PCs of all cells): {} moves, {} clusters'.format(
-            k, moves, labels.max() + 1))
+        log.append('reassignment to the nearest cluster centre (top {} PCs of {}): {} moves, {} clusters'.format(
+            k, 'the {} features used by the splits'.format(len(cols)) if select and used else 'all features',
+            moves, labels.max() + 1))
     return labels, log
