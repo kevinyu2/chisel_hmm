@@ -20,19 +20,13 @@ python2.7 Cloner.py calls/calls.tsv --clustering divisive [--seed 12] > clones/m
   expresses values in units of counting noise. All bins are used.
 * Very noisy cells (robust noise level more than `--outlierz` 5 robust SDs above the typical cell) are
   set apart: clone None, own calls (`--assignoutliers` gives them the nearest clone).
-* Before every split, only the group's `--features` (default 200) most variable features are used,
-  variance measured in units of counting noise (about 1 where the group's cells agree): with
-  thousands of bins and few cells the noise floor of PCA grows with the number of features, so a
-  difference over a few bins (e.g. two 0.5-Mb events in 100-kb bins) is hidden on all features but
-  clear on the selected ones. Features are chosen again in every group (`--features 0`: all).
 * A group of cells is split in two when its own PCA has a PC beating a permutation noise floor by
   `--floormargin` 1.5x (every feature shuffled across the group's cells, `--perm` 20 times,
   `--permq` 95th percentile: Horn's parallel analysis), the cells projected on that direction have
   several modes (1-4 Gaussians by BIC) with a clear gap (Ashman's D >= `--ashman` 2, the cut placed in
   the widest gap), and both halves have >= `--minsize` 14 cells (small outlier groups are set aside
   and the split retried, `--peel`). Groups that do not split are the clones (at most `--maxclones`).
-* Finally cells are reassigned to the nearest clone centre, in the features used by the splits
-  (`--noreassign` to skip).
+* Finally cells are reassigned to the nearest clone centre (`--noreassign` to skip).
 * The corrected calls are each clone's majority state per bin, as in the default mode. The split tree
   is in the log.
 

@@ -84,18 +84,6 @@ def test_noisy_cells_are_set_apart_and_do_not_hide_a_clone():
     assert ari(truth, labels[:-25]) > 0.95
 
 
-@pytest.mark.parametrize('seed', [11, 21])
-def test_feature_selection_finds_a_small_difference_all_features_miss(seed):
-    # 100 vs 300 cells differing in 16 of 2000 features: with thousands of features the noise floor of the
-    # top PC hides it; the group's 200 most variable features (in noise units) show it
-    X, truth = profiles([(100, {}), (300, {(0, 16): 1.5})], np.random.RandomState(seed), n_feat=2000)
-    Z = X - X.mean(0)                                   # noise SD is 1: already in noise units
-    lab_all, _ = divisive(X, np.random.RandomState(12), n_perm=10, Z=Z, n_features=0)
-    lab_sel, log = divisive(X, np.random.RandomState(12), n_perm=10, Z=Z, n_features=200)
-    assert lab_all.max() + 1 == 1
-    assert lab_sel.max() + 1 == 2 and ari(truth, lab_sel) > 0.95, '\n'.join(log)
-
-
 def write_calls(path, rng, noise=0.10):
     """calls.tsv: 2 chromosomes x 40 bins, clones A (60 cells, 15-bin gain), B and C (50 each, small events)."""
     groups = ['A'] * 60 + ['B'] * 50 + ['C'] * 50
