@@ -17,14 +17,6 @@ difference over a few bins (e.g. 1 Mb in 100-kb bins) is invisible to PCA on all
 on the selected ones. The features are chosen again in every group, so nested differences each get
 their turn. The permutation test stays valid: shuffling keeps every selected feature's variance.
 
-Window features (scales): instead of single bins, the features are sums of 2, 3, ... consecutive
-bins of a chromosome (sliding windows, every scale in `scales`; 1 = the bins themselves), divided by
-sqrt(window length) so that pure noise keeps variance 1 in noise units. An event over a few bins,
-whose single bins are each too weak to stand out among thousands of noise features, adds up in the
-window that covers it. Overlapping windows share bins and therefore noise, so the permutation test
-shuffles the bins (each bin's values across the group's cells) and rebuilds the selected windows from
-them: the null keeps exactly the overlap structure of the real features.
-
 Starting from all cells, a group is split in two when all of these hold:
   * signal: PCA of the group's own cells has at least one PC whose variance beats a noise floor by
     floor_margin, the floor being the perm_q percentile of the top PC variance over perm matrices in
@@ -118,30 +110,6 @@ def noise_matrix(arr):
     return np.where(np.isfinite(Z), Z, 0.0)
 
 
-def window_matrix(chroms, scales=(2, 3)):
-    """Sliding windows of consecutive bins of the same chromosome, for every scale, as a sparse matrix
-    (2 * bins) x features mapping [RDR bins | BAF bins] to [RDR windows | BAF windows]; entries
-    1 / sqrt(window length). Returns (matrix, description of every feature as (block, scale, first bin))."""
-    from scipy import sparse
-    nb = len(chroms)
-    rows, cols, vals, desc = [], [], [], []
-    for block, off in (('RDR', 0), ('BAF', nb)):
-        for k in sorted(set(int(x) for x in scales)):
-            if k < 1:
-                raise ValueError('window scales must be positive')
-            for i in range(nb - k + 1):
-                if chroms[i] != chroms[i + k - 1]:
-                    continue                                  # a window never crosses chromosomes
-                j = len(desc)
-                for b in range(i, i + k):
-                    rows.append(off + b)
-                    cols.append(j)
-                    vals.append(1.0 / np.sqrt(k))
-                desc.append((block, k, i))
-    W = sparse.csc_matrix((vals, (rows, cols)), shape=(2 * nb, len(desc)))
-    return W, desc
-
-
 def kmeans(X, K, rng, n_init=20, iters=300):
     """Lloyd's k-means with k-means++ starts, best of n_init; labels 0..K-1."""
     n = X.shape[0]
@@ -167,25 +135,9 @@ def kmeans(X, K, rng, n_init=20, iters=300):
     return best
 
 
-def signal_pcs(X, rng, n_perm=20, q=95.0, margin=1.3, max_pcs=20, W=None):
-    """Horn's parallel analysis -> (number of signal PCs, PC scores, PC variances, noise floor).
-    With W (inputs x features, dense), the features are X W, and the permutations shuffle the inputs
-    (columns of X) and rebuild the features, which keeps the structure W gives them under the null."""
+def signal_pcs(X, rng, n_perm=20, q=95.0, margin=1.5, max_pcs=20):
+    """Horn's parallel analysis -> (number of signal PCs, PC scores, PC variances, noise floor)."""
     from scipy.sparse.linalg import svds
-    if W is not None:
-        Xin = X - X.mean(axis=0)
-        n = Xin.shape[0]
-        Xc = Xin.dot(W)
-        U, S, _ = np.linalg.svd(Xc, full_matrices=False)
-        var = S ** 2 / max(n - 1, 1)
-        top = []
-        cols = np.arange(Xin.shape[1])
-        for _ in range(n_perm):
-            idx = rng.rand(*Xin.shape).argsort(axis=0)
-            top.append(svds(Xin[idx, cols].dot(W), k=1, return_singular_vectors=False)[0] ** 2 / max(n - 1, 1))
-        floor = float(np.percentile(top, q)) * margin
-        k = min(max_pcs, len(S))
-        return int((var > floor).sum()), U[:, :k] * S[:k], var, floor
     Xc = X - X.mean(axis=0)
     n = Xc.shape[0]
     U, S, _ = np.linalg.svd(Xc, full_matrices=False)
@@ -283,8 +235,8 @@ def noisy_cells(X, z=5.0):
     return spread > centre + z * scale
 
 
-def divisive(X, rng, min_size=14, n_perm=20, q=95.0, margin=1.3, ashman=2.0, peel=5, max_clusters=30, reassign=True,
-             outlier_z=5.0, Z=None, n_features=0, W=None):
+def divisive(X, rng, min_size=14, n_perm=20, q=95.0, margin=1.5, ashman=2.0, peel=5, max_clusters=30, reassign=True,
+             outlier_z=5.0, Z=None, n_features=0):
     """Top-down clustering of the rows of X -> (labels 0..K-1, -1 for noisy cells set apart; log lines)."""
     log = []
     noisy = noisy_cells(X, outlier_z) if outlier_z > 0 else np.zeros(X.shape[0], dtype=bool)
@@ -294,41 +246,24 @@ def divisive(X, rng, min_size=14, n_perm=20, q=95.0, margin=1.3, ashman=2.0, pee
     if n_features and Z is None:
         raise ValueError('feature selection needs the noise matrix Z')
     labels, steps = _divisive(X[keep], rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign,
-                              None if Z is None else Z[keep], n_features, W)
+                              None if Z is None else Z[keep], n_features)
     full = np.full(X.shape[0], -1, dtype=int)
     full[keep] = labels
     return full, log + steps
 
 
-def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign, Z=None, n_features=0, W=None):
+def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign, Z=None, n_features=0):
     leaves, queue, log, used = [], [(np.arange(X.shape[0]), 'root', 0)], [], set()
-    nfeat = X.shape[1] if W is None else W.shape[1]
-    select = n_features and 0 < n_features < nfeat
-    ZW = None
-    if select:
-        ZW = Z if W is None else np.asarray(W.T.dot(Z.T).T)          # features in noise units, all cells
+    select = n_features and 0 < n_features < X.shape[1]
 
     def features(cells):
         """The group's n_features most variable features in noise units (all features without selection)."""
         if not select:
-            return np.arange(nfeat), ''
-        disp = ZW[cells].var(axis=0)
+            return np.arange(X.shape[1]), ''
+        disp = Z[cells].var(axis=0)
         f = np.sort(np.argsort(-disp)[:n_features])
         return f, ', top {} features (noise-unit variance {:.2g}-{:.2g}, median of all {:.2g})'.format(
             n_features, disp[f].min(), disp[f].max(), np.median(disp))
-
-    def featurize(cells, feats):
-        """Values of features feats for cells (X W[:, feats], or X columns without windows)."""
-        if W is None:
-            return X[np.ix_(cells, feats)]
-        return np.asarray(W[:, feats].T.dot(X[cells].T).T)
-
-    def test(cells, feats):
-        if W is None:
-            return signal_pcs(X[np.ix_(cells, feats)], rng, n_perm, q, margin)
-        Wf = W[:, feats]
-        support = np.unique(Wf.nonzero()[0])                          # the bins the selected windows use
-        return signal_pcs(X[np.ix_(cells, support)], rng, n_perm, q, margin, W=Wf[support].toarray())
     while queue:
         idx, name, depth = queue.pop(0)
         pad = '  ' * depth
@@ -343,7 +278,7 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
                 verdict = '{} cells left after setting aside {} outliers -> cluster'.format(len(core), len(peeled))
                 break
             feats, fnote = features(core)
-            m, scores, var, floor = test(core, feats)
+            m, scores, var, floor = signal_pcs(X[np.ix_(core, feats)], rng, n_perm, q, margin)
             if m == 0:
                 verdict = 'PC1 variance {:.3g} vs noise floor {:.3g}: no signal PC{} -> cluster'.format(var[0], floor, fnote)
                 break
@@ -381,8 +316,8 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
         used.update(feats.tolist())
         halves = [core[lab == 0], core[lab == 1]]
         if len(peeled):
-            cen = [featurize(h, feats).mean(0) for h in halves]
-            near = np.argmin([((featurize(peeled, feats) - c) ** 2).sum(1) for c in cen], axis=0)
+            cen = [X[np.ix_(h, feats)].mean(0) for h in halves]
+            near = np.argmin([((X[np.ix_(peeled, feats)] - c) ** 2).sum(1) for c in cen], axis=0)
             halves = [np.concatenate([halves[k], peeled[near == k]]) for k in (0, 1)]
         log.append("{}{}: {} cells, {} signal PC(s) (PC1 {:.3g} vs floor {:.3g}{}), {} modes, cut at the widest gap "
                    "(Ashman's D {:.2f}) -> split {} / {}{}".format(pad, name, len(idx), m, var[0], floor, fnote, nmodes, dd,
@@ -393,9 +328,8 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
     for i, idx in enumerate(leaves):
         labels[idx] = i
     if reassign and len(leaves) > 1:
-        cols = np.array(sorted(used)) if select and used else np.arange(nfeat)
-        F = featurize(np.arange(X.shape[0]), cols)
-        Xc = F - F.mean(axis=0)
+        cols = np.array(sorted(used)) if select and used else np.arange(X.shape[1])
+        Xc = X[:, cols] - X[:, cols].mean(axis=0)
         U, S, _ = np.linalg.svd(Xc, full_matrices=False)
         k = min(max(20, len(leaves)), len(S))
         P = U[:, :k] * S[:k]

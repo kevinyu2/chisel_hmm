@@ -25,12 +25,8 @@ python2.7 Cloner.py calls/calls.tsv --clustering divisive [--seed 12] > clones/m
   thousands of bins and few cells the noise floor of PCA grows with the number of features, so a
   difference over a few bins (e.g. two 0.5-Mb events in 100-kb bins) is hidden on all features but
   clear on the selected ones. Features are chosen again in every group (`--features 0`: all).
-* Features are sums of `--scales` consecutive bins (default windows of 2 and 3 bins, divided by the square
-  root of their length so pure noise keeps variance 1 in noise units; `--scales 1` for single bins): an
-  event over a few bins whose single bins are each too weak adds up in the window covering it. The
-  permutation test shuffles bins and rebuilds the windows, so it keeps their overlap structure.
 * A group of cells is split in two when its own PCA has a PC beating a permutation noise floor by
-  `--floormargin` 1.3x (every feature shuffled across the group's cells, `--perm` 20 times,
+  `--floormargin` 1.5x (every feature shuffled across the group's cells, `--perm` 20 times,
   `--permq` 95th percentile: Horn's parallel analysis), the cells projected on that direction have
   several modes (1-4 Gaussians by BIC) with a clear gap (Ashman's D >= `--ashman` 2, the cut placed in
   the widest gap), and both halves have >= `--minsize` 14 cells (small outlier groups are set aside

@@ -9,7 +9,7 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from chisel.CellClusterer import bimodal, mode_split, signal_pcs, divisive, kmeans, read_features, feature_matrix, noisy_cells, window_matrix
+from chisel.CellClusterer import bimodal, mode_split, signal_pcs, divisive, kmeans, read_features, feature_matrix, noisy_cells
 
 PY2 = sys.version_info[0] == 2
 
@@ -90,44 +90,10 @@ def test_feature_selection_finds_a_small_difference_all_features_miss(seed):
     # top PC hides it; the group's 200 most variable features (in noise units) show it
     X, truth = profiles([(100, {}), (300, {(0, 16): 1.5})], np.random.RandomState(seed), n_feat=2000)
     Z = X - X.mean(0)                                   # noise SD is 1: already in noise units
-    lab_all, _ = divisive(X, np.random.RandomState(12), n_perm=10, margin=1.5, Z=Z, n_features=0)        # calibrated at 1.5
-    lab_sel, log = divisive(X, np.random.RandomState(12), n_perm=10, margin=1.5, Z=Z, n_features=200)
+    lab_all, _ = divisive(X, np.random.RandomState(12), n_perm=10, Z=Z, n_features=0)
+    lab_sel, log = divisive(X, np.random.RandomState(12), n_perm=10, Z=Z, n_features=200)
     assert lab_all.max() + 1 == 1
     assert lab_sel.max() + 1 == 2 and ari(truth, lab_sel) > 0.95, '\n'.join(log)
-
-
-def test_window_matrix():
-    W, desc = window_matrix(['chr1'] * 4 + ['chr2'] * 3, (2, 3))
-    A = W.toarray()
-    assert A.shape == (14, 2 * ((3 + 2) + (2 + 1)))          # (RDR + BAF bins) x (2- and 3-windows per chromosome)
-    for j, (block, k, i) in enumerate(desc):
-        off = 0 if block == 'RDR' else 7
-        assert np.flatnonzero(A[:, j]).tolist() == list(range(off + i, off + i + k))
-        assert np.allclose(A[A[:, j] > 0, j], 1 / np.sqrt(k))
-    assert not any(A[3, j] and A[4, j] for j in range(A.shape[1]))   # no window across chr1 / chr2
-
-
-def test_windows_keep_pure_noise_unsplit():
-    chroms = ['chr1'] * 500 + ['chr2'] * 500
-    W = window_matrix(chroms, (2, 3))[0]
-    for seed in (1, 2):
-        X = np.random.RandomState(seed).normal(0, 1, (400, 2000))
-        lab, log = divisive(X, np.random.RandomState(seed), n_perm=10, Z=X - X.mean(0), n_features=200, W=W)
-        assert lab.max() + 1 == 1, '\n'.join(log)
-
-
-@pytest.mark.parametrize('seed', [11, 21])
-def test_windows_find_a_few_consecutive_bins_single_bins_miss(seed):
-    # 100 vs 300 cells differing by 1.2 noise SDs in 5 consecutive bins (per cell ~2.7 SDs summed: a
-    # 1:3 mixture that even an ideal cut splits with ~15% of cells on the wrong side, ARI ~0.6)
-    chroms = ['chr1'] * 500 + ['chr2'] * 500
-    W = window_matrix(chroms, (2, 3))[0]
-    X, truth = profiles([(100, {}), (300, {(100, 105): 1.2})], np.random.RandomState(seed), n_feat=2000)
-    Z = X - X.mean(0)
-    single, _ = divisive(X, np.random.RandomState(12), n_perm=10, Z=Z, n_features=200)
-    win, log = divisive(X, np.random.RandomState(12), n_perm=10, Z=Z, n_features=200, W=W)
-    assert single.max() + 1 == 1
-    assert win.max() + 1 == 2 and ari(truth, win) > 0.45, '\n'.join(log)
 
 
 def write_calls(path, rng, noise=0.10):
