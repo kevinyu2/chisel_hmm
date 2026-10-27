@@ -34,12 +34,13 @@ def parse_args(args):
     dv.add_argument("--noisescale", default=False, action='store_true', help="Express RDR and BAF in units of their expected counting noise (default: disabled)")
     dv.add_argument("--perm", type=int, default=20, help="Permutations per split test (default: 20)")
     dv.add_argument("--permq", type=float, default=95.0, help="Noise floor = this percentile of the permuted top PC variance (default: 95)")
-    dv.add_argument("--floormargin", type=float, default=1.5, help="A signal PC must exceed the noise floor by this factor (default: 1.5)")
+    dv.add_argument("--floormargin", type=float, default=1.3, help="A signal PC must exceed the noise floor by this factor (default: 1.3)")
     dv.add_argument("--ashman", type=float, default=2.0, help="Minimum Ashman's D between the two halves of a split (default: 2)")
     dv.add_argument("--peel", type=int, default=5, help="Times to set aside small outlier groups and retry a split (default: 5)")
     dv.add_argument("--maxclones", type=int, default=30, help="Stop splitting at this many clusters (default: 30)")
     dv.add_argument("--noreassign", default=False, action='store_true', help="Keep the split tree's assignment, no final reassignment (default: disabled)")
     dv.add_argument("--features", type=int, default=200, help="Features (bins x RDR/BAF) used per split: the group's most variable ones in noise units, chosen again in every group (0 = all) (default: 200)")
+    dv.add_argument("--scales", type=str, default='2,3', help="Window lengths in consecutive bins for the features, comma-separated (1 = single bins) (default: 2,3)")
     dv.add_argument("--outlierz", type=float, default=5.0, help="Set apart cells whose noise level is more than this many robust SDs above the typical cell (0 = off) (default: 5)")
     dv.add_argument("--assignoutliers", default=False, action='store_true', help="Give the noisy cells set apart the nearest clone (default: disabled, they keep their own calls, clone None)")
     args = parser.parse_args(args)
@@ -78,7 +79,8 @@ def parse_args(args):
         'divisive' : {'rdr_weight' : args.rdrweight, 'noise_scale' : args.noisescale, 'n_perm' : args.perm, 'q' : args.permq,
                       'margin' : args.floormargin, 'ashman' : args.ashman, 'peel' : args.peel,
                       'max_clusters' : args.maxclones, 'reassign' : not args.noreassign,
-                      'outlier_z' : args.outlierz, 'assign_outliers' : args.assignoutliers, 'n_features' : args.features}
+                      'outlier_z' : args.outlierz, 'assign_outliers' : args.assignoutliers, 'n_features' : args.features,
+                      'scales' : [int(x) for x in args.scales.split(',') if x.strip()]}
     }
 
 
@@ -177,16 +179,19 @@ def clustering(cns, pos, cells, maxdiff, linkage, weights=None):
 
 def divisive_clustering(path, cells, minsize, seed, opts):
     """Cells grouped top-down on their RDR and BAF (CellClusterer.divisive) -> {cell : cluster id from 1}."""
-    from CellClusterer import read_features, feature_matrix, noise_matrix, divisive
+    from CellClusterer import read_features, feature_matrix, noise_matrix, divisive, window_matrix
     fcells, bins, arr = read_features(path)
     assert list(fcells) == list(cells), 'cells of the features and of the calls differ'
     X = feature_matrix(arr, rdr_weight=opts['rdr_weight'], noise_scale=opts['noise_scale'])
-    log('Divisive clustering of {} cells on {} features ({} bins x RDR and BAF)'.format(X.shape[0], X.shape[1], len(bins)), level='INFO')
+    W = None if opts['scales'] == [1] else window_matrix([b[0] for b in bins], opts['scales'])[0]
+    log('Divisive clustering of {} cells on {} features ({} bins x RDR and BAF{})'.format(
+        X.shape[0], X.shape[1] if W is None else W.shape[1], len(bins),
+        '' if W is None else ', windows of {} bins'.format(','.join(map(str, opts['scales'])))), level='INFO')
     labels, steps = divisive(X, np.random.RandomState(seed if seed is not None else 0), min_size=minsize,
                              n_perm=opts['n_perm'], q=opts['q'], margin=opts['margin'], ashman=opts['ashman'],
                              peel=opts['peel'], max_clusters=opts['max_clusters'], reassign=opts['reassign'],
                              outlier_z=opts['outlier_z'], Z=noise_matrix(arr) if opts['n_features'] else None,
-                             n_features=opts['n_features'])
+                             n_features=opts['n_features'], W=W)
     log('Divisive splits:\n' + '\n'.join(steps), level='INFO')
     noisy = np.flatnonzero(labels < 0)
     if len(noisy) and opts['assign_outliers'] and (labels >= 0).any():
