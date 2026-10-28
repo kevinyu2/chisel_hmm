@@ -130,7 +130,8 @@ def test_cloner_divisive_end_to_end():
     path = os.path.join(tmp, 'calls.tsv')
     groups, truth = write_calls(path, np.random.RandomState(6))
     out = os.path.join(tmp, 'mapping.tsv')
-    cloner_main(args=[path, '--clustering', 'divisive', '--perm', '10', '--seed', '1'], stdout_file=out)
+    # the synthetic calls have no bin clusters (CLUSTER 0 everywhere): test the majority vote
+    cloner_main(args=[path, '--clustering', 'divisive', '--perm', '10', '--seed', '1', '--nopseudobulk'], stdout_file=out)
     clone = {}
     with open(out) as f:
         assert f.readline().startswith('#CELL')
@@ -152,6 +153,111 @@ def test_cloner_divisive_end_to_end():
 
 
 @pytest.mark.skipif(not PY2, reason='Cloner.py is Python 2.7 code')
-def test_cloner_default_is_still_hamming():
+def test_cloner_defaults_divisive_with_pseudobulk_and_legacy_switches():
     from chisel.Cloner import parse_args
-    assert parse_args([__file__])['clustering'] == 'hamming'
+    a = parse_args([__file__])
+    assert a['clustering'] == 'divisive' and a['pseudobulk']
+    assert not parse_args([__file__, '--nopseudobulk'])['pseudobulk']
+    h = parse_args([__file__, '--clustering', 'hamming'])
+    assert h['clustering'] == 'hamming' and not h['pseudobulk']          # hamming implies no pseudobulk
+
+
+def test_cell_groups_command_and_read_groups_skip_noisy_cells():
+    from chisel.CellClusterer import cell_groups
+    from chisel.HMMClusterizer import read_groups
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, 'calls.tsv')
+    groups, _ = write_calls(path, np.random.RandomState(13))
+    g, log = cell_groups(path, n_perm=10)
+    names = [g['cell{:03d}'.format(e)] for e in range(len(groups))]
+    assert ari(groups, names) > 0.98 and set(names) == {'Group1', 'Group2', 'Group3'}
+    gf = os.path.join(tmp, 'groups.tsv')
+    with open(gf, 'w') as f:
+        f.write('#CELL\tGROUP\n')
+        for i, (e, k) in enumerate(g.items()):
+            f.write('{}\t{}\n'.format(e, 'None' if i == 0 else k))     # one cell set apart
+    rg = read_groups(gf, list(g.keys()))
+    assert sum(len(ix) for _, ix in rg) == len(g) - 1 and 0 not in np.concatenate([ix for _, ix in rg])
+
+
+def write_clone_calls(path, rng, weak=0.7):
+    """calls.tsv with the true bin clusters; clone B has a 1-bin deletion that only (1 - weak) of its cells call."""
+    groups = ['A'] * 60 + ['B'] * 50 + ['C'] * 50
+    def cn(g, chrom, i):
+        if g == 'A' and chrom == 'chr1' and 20 <= i < 35: return (1, 2)
+        if g == 'B' and chrom == 'chr1' and 5 <= i < 8: return (1, 2)
+        if g == 'B' and chrom == 'chr2' and i == 10: return (0, 1)
+        if g == 'C' and chrom == 'chr2' and 20 <= i < 23: return (1, 2)
+        return (1, 1)
+    def bincl(chrom, i):
+        for k, (c, lo, hi) in enumerate((('chr1', 20, 35), ('chr1', 5, 8), ('chr2', 10, 11), ('chr2', 20, 23))):
+            if chrom == c and lo <= i < hi:
+                return k + 1
+        return 0
+    depth = rng.lognormal(0, 0.15, len(groups))
+    rows = []
+    for chrom in ('chr1', 'chr2'):
+        for i in range(40):
+            for e, g in enumerate(groups):
+                a, b = cn(g, chrom, i)
+                cnt = rng.poisson(60 * depth[e] * (a + b) / 2.0)
+                snp = rng.poisson(10 * (a + b) / 2.0)
+                bb = rng.binomial(snp, b / float(a + b))
+                call = (a, b)
+                if g == 'B' and chrom == 'chr2' and i == 10 and rng.rand() < weak:
+                    call = (1, 1)
+                elif rng.rand() < 0.05:
+                    call = tuple(rng.randint(0, 3, 2))
+                rows.append([chrom, i * 1000000, (i + 1) * 1000000, 'cell{:03d}'.format(e), 4000, cnt, 0.0, snp - bb, bb,
+                             bb / float(snp) if snp else 0.5, bincl(chrom, i), '{}|{}'.format(*call)])
+    tot = {}
+    for r in rows:
+        tot[r[3]] = tot.get(r[3], 0) + r[5]
+    with open(path, 'w') as f:
+        f.write('#CHR\tSTART\tEND\tCELL\tNORM_COUNT\tCOUNT\tRDR\tA_COUNT\tB_COUNT\tBAF\tCLUSTER\tHAP_CN\n')
+        for r in rows:
+            r[6] = (r[5] / float(tot[r[3]])) / (4000.0 / (80 * 4000))
+            f.write('\t'.join(map(str, r)) + '\n')
+    return groups
+
+
+@pytest.mark.skipif(not PY2, reason='Cloner.py is Python 2.7 code')
+def test_pseudobulk_calls_keep_an_event_most_single_cells_miss():
+    from chisel.Cloner import main as cloner_main
+    out = {}
+    for mode in ('pseudobulk', 'vote'):
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, 'calls.tsv')
+        groups = write_clone_calls(path, np.random.RandomState(4))
+        args = [path, '--seed', '1', '-P', '3', '--perm', '10'] + (['--nopseudobulk'] if mode == 'vote' else [])
+        cloner_main(args=args, stdout_file=os.path.join(tmp, 'mapping.tsv'))
+        with open(path) as f:
+            f.readline()
+            rows = [l.split() for l in f]
+        dele = [r[12] for r in rows if r[0] == 'chr2' and r[1] == '10000000' and groups[int(r[3][4:])] == 'B']
+        raw = [r[11] for r in rows if r[0] == 'chr2' and r[1] == '10000000' and groups[int(r[3][4:])] == 'B']
+        out[mode] = (np.mean([x == '0|1' for x in raw]), np.mean([x == '0|1' for x in dele]))
+        if mode == 'pseudobulk':
+            assert os.path.isfile(os.path.join(tmp, 'pseudobulk_calls.tsv'))
+    assert out['pseudobulk'][0] < 0.5                    # most single cells miss the deletion
+    assert out['vote'][1] == 0.0                         # so the majority vote erases it
+    assert out['pseudobulk'][1] == 1.0                   # the clone's pooled reads keep it
+
+
+@pytest.mark.skipif(not PY2, reason='Cloner.py is Python 2.7 code')
+def test_cloner_takes_given_groups():
+    from chisel.Cloner import main as cloner_main
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, 'calls.tsv')
+    groups = write_clone_calls(path, np.random.RandomState(5))
+    gf = os.path.join(tmp, 'groups.tsv')
+    with open(gf, 'w') as f:
+        f.write('#CELL\tGROUP\n')
+        for e, g in enumerate(groups):
+            f.write('cell{:03d}\t{}\n'.format(e, 'None' if e == 0 else 'G' + g))
+    out = os.path.join(tmp, 'mapping.tsv')
+    cloner_main(args=[path, '--groups', gf, '--nopseudobulk'], stdout_file=out)
+    with open(out) as f:
+        f.readline()
+        clone = {l.split()[0]: l.split()[2] for l in f}
+    assert clone['cell000'] == 'None' and len(set(v for v in clone.values() if v != 'None')) == 3

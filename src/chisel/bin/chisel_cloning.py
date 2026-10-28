@@ -24,7 +24,9 @@ def parse_args():
     parser.add_argument("-r", "--refinement", required=False, type=float, default=None, help="Maximum difference to assign noisy cells to the closest clone (default: 0.0, note that 1.0 can be used to force the assigment of all cells)")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: None)")
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Length-weighted differences between cells, as chisel uses with variable-length bins (default: disabled)")
-    parser.add_argument("--cloning", required=False, type=str, default='hamming', choices=['hamming', 'divisive'], help="Grouping of cells into clones: hamming = CHISEL's clustering of the called states (-f, -r); divisive = top-down splitting on RDR and BAF with permutation-tested splits (Cloner.py --clustering divisive; -s is the minimum clone size) (default: hamming)")
+    parser.add_argument("--cloning", required=False, type=str, default='divisive', choices=['divisive', 'hamming'], help="Grouping of cells into clones: divisive = top-down splitting on RDR and BAF with permutation-tested splits (Cloner.py --clustering divisive; -s is the minimum clone size); hamming = CHISEL's original clustering of the called states (-f, -r; implies --nopseudobulk) (default: divisive)")
+    parser.add_argument("--nopseudobulk", required=False, default=False, action='store_true', help="With divisive cloning: correct copy numbers by majority vote of each clone's cells instead of calling its pooled reads (default: pseudobulk)")
+    parser.add_argument("-P", "--maxploidy", required=False, type=int, default=4, help="Maximum ploidy for the pseudobulk calling of the clones (default: 4)")
     args = parser.parse_args()
 
     if not os.path.isfile(args.INPUT):
@@ -46,7 +48,9 @@ def parse_args():
         "refinement" : args.refinement,
         "seed" : args.seed,
         "weighted" : args.weighted,
-        "cloning" : args.cloning
+        "cloning" : args.cloning,
+        "pseudobulk" : args.cloning == 'divisive' and not args.nopseudobulk,
+        "maxploidy" : args.maxploidy
     }
 
 
@@ -72,8 +76,9 @@ def main():
         cmd += " --seed {}".format(args['seed'])
     if args['weighted']:
         cmd += " --weighted"
-    if args['cloning'] != 'hamming':
-        cmd += " --clustering {}".format(args['cloning'])
+    cmd += " --clustering {} -P {}".format(args['cloning'], args['maxploidy'])
+    if not args['pseudobulk']:
+        cmd += " --nopseudobulk"
     runcmd(cmd, dclo, out='mapping.tsv')
     mapping = os.path.join(dclo, 'mapping.tsv')
 

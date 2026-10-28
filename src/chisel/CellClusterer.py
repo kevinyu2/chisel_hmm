@@ -303,3 +303,53 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
         log.append('reassignment to the nearest cluster centre (top {} PCs of all cells): {} moves, {} clusters'.format(
             k, moves, labels.max() + 1))
     return labels, log
+
+
+def cell_groups(path, seed=0, min_size=14, rdr_weight=0.5, noise_scale=False, n_perm=20, q=95.0, margin=1.5,
+                ashman=2.0, peel=5, max_clusters=30, reassign=True, outlier_z=5.0):
+    """Divisive groups of the cells of a combo.tsv or calls.tsv -> (OrderedDict cell -> group name, log lines).
+    Groups are Group1, Group2, ... by decreasing size; very noisy cells set apart get None."""
+    from collections import OrderedDict
+    cells, bins, arr = read_features(path)
+    X = feature_matrix(arr, rdr_weight=rdr_weight, noise_scale=noise_scale)
+    labels, log = divisive(X, np.random.RandomState(seed), min_size=min_size, n_perm=n_perm, q=q, margin=margin,
+                           ashman=ashman, peel=peel, max_clusters=max_clusters, reassign=reassign, outlier_z=outlier_z)
+    sizes = np.bincount(labels[labels >= 0]) if (labels >= 0).any() else np.array([], dtype=int)
+    rank = {k: i + 1 for i, k in enumerate(np.argsort(-sizes, kind='mergesort'))}
+    out = OrderedDict((e, 'Group{}'.format(rank[l]) if l >= 0 else 'None') for e, l in zip(cells, labels))
+    head = ['{} cells, {} bins: {} groups ({}){}'.format(
+        len(cells), len(bins), len(sizes), ', '.join(str(s) for s in sorted(sizes, reverse=True)),
+        ', {} noisy cells set apart (None)'.format(int((labels < 0).sum())) if (labels < 0).any() else '')]
+    return out, head + log
+
+
+def main(argv=None):
+    """CELL GROUP for every cell of a combo.tsv / calls.tsv (divisive clustering on RDR and BAF), to stdout."""
+    import argparse
+    import sys
+    p = argparse.ArgumentParser(description="Divisive groups of cells from CHISEL's combo.tsv or calls.tsv (CELL GROUP to stdout; very noisy cells: None)")
+    p.add_argument('INPUT', help='combo.tsv or calls.tsv')
+    p.add_argument('--seed', type=int, default=0)
+    p.add_argument('-s', '--minsize', type=int, default=14, help='minimum group size (default: 14)')
+    p.add_argument('--rdrweight', type=float, default=0.5)
+    p.add_argument('--noisescale', action='store_true')
+    p.add_argument('--perm', type=int, default=20)
+    p.add_argument('--permq', type=float, default=95.0)
+    p.add_argument('--floormargin', type=float, default=1.5)
+    p.add_argument('--ashman', type=float, default=2.0)
+    p.add_argument('--peel', type=int, default=5)
+    p.add_argument('--maxclones', type=int, default=30)
+    p.add_argument('--noreassign', action='store_true')
+    p.add_argument('--outlierz', type=float, default=5.0)
+    a = p.parse_args(argv)
+    groups, log = cell_groups(a.INPUT, seed=a.seed, min_size=a.minsize, rdr_weight=a.rdrweight, noise_scale=a.noisescale,
+                              n_perm=a.perm, q=a.permq, margin=a.floormargin, ashman=a.ashman, peel=a.peel,
+                              max_clusters=a.maxclones, reassign=not a.noreassign, outlier_z=a.outlierz)
+    sys.stderr.write('Divisive cell groups: ' + '\n'.join(log) + '\n')
+    sys.stdout.write('#CELL\tGROUP\n')
+    for e, g in groups.items():
+        sys.stdout.write('{}\t{}\n'.format(e, g))
+
+
+if __name__ == '__main__':
+    main()

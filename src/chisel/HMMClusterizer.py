@@ -118,9 +118,10 @@ def from_caller(bins, cells, pos):
 
 
 def read_groups(path, cells):
-    """CELL GROUP per line -> list of (group name, cell indices); every cell must be listed."""
+    """CELL GROUP per line -> list of (group name, cell indices); every cell must be listed. Cells whose
+    group is None (e.g. noisy cells set apart by the divisive cell groups) are left out of the pseudobulks."""
     index = {e: i for i, e in enumerate(cells)}
-    groups, order = {}, []
+    groups, order, skipped = {}, [], []
     with open(path) as f:
         for line in f:
             p = line.split()
@@ -130,11 +131,14 @@ def read_groups(path, cells):
                 raise ValueError('{}: every line needs CELL GROUP: {}'.format(path, line.strip()))
             if p[0] not in index:
                 continue
+            if p[1] == 'None':
+                skipped.append(index[p[0]])
+                continue
             if p[1] not in groups:
                 groups[p[1]] = []
                 order.append(p[1])
             groups[p[1]].append(index[p[0]])
-    missing = len(cells) - sum(len(v) for v in groups.values())
+    missing = len(cells) - sum(len(v) for v in groups.values()) - len(skipped)
     if missing:
         raise ValueError('{}: {} of {} cells have no group'.format(path, missing, len(cells)))
     return [(g, np.array(sorted(groups[g]))) for g in order]

@@ -28,7 +28,10 @@ def parse_args(args):
     parser.add_argument("-l", "--linkage", required=False, type=str, default='weighted', help="Linkage method to use for the hierarchical clustering (default: weighted, it must be a valid linkage method available in SciPy when using a non-euclidean distance, i.e. 'single', 'complete', 'average', 'weighted')")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: none)")
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Weight every bin by its length when measuring differences between cells, so that --maxdiff and --refinement are fractions of the genome also with variable-length bins (default: disabled, every bin has the same weight)")
-    parser.add_argument("--clustering", required=False, type=str, default='hamming', choices=['hamming', 'divisive'], help="How cells are grouped: hamming = CHISEL's hierarchical clustering of the called copy-number states (-f, -l, -r); divisive = top-down splitting on the cells' RDR and BAF with permutation-tested splits (see CellClusterer.py; -s is the minimum clone size) (default: hamming)")
+    parser.add_argument("--clustering", required=False, type=str, default='divisive', choices=['hamming', 'divisive'], help="How cells are grouped: divisive = top-down splitting on the cells' RDR and BAF with permutation-tested splits (see CellClusterer.py; -s is the minimum clone size); hamming = CHISEL's original hierarchical clustering of the called copy-number states (-f, -l, -r; implies --nopseudobulk) (default: divisive)")
+    parser.add_argument("--groups", required=False, type=str, default=None, help="With divisive clustering: take the cell groups from this file (CELL GROUP, e.g. calls/cellgroups.tsv written before calling; None = noisy cell, no clone) instead of computing them (default: compute)")
+    parser.add_argument("--nopseudobulk", required=False, default=False, action='store_true', help="Corrected copy numbers by majority vote of the clone's per-cell calls (CHISEL's original way) instead of calling every clone's pooled reads (default: pseudobulk calling with divisive clustering)")
+    parser.add_argument("-P", "--maxploidy", required=False, type=int, default=4, help="Maximum ploidy for the pseudobulk calling of the clones, as Caller's -P (default: 4)")
     dv = parser.add_argument_group('divisive clustering (--clustering divisive)')
     dv.add_argument("--rdrweight", type=float, default=0.5, help="Weight of RDR vs BAF (1 - w) in the cell distances (default: 0.5)")
     dv.add_argument("--noisescale", default=False, action='store_true', help="Express RDR and BAF in units of their expected counting noise (default: disabled)")
@@ -60,6 +63,11 @@ def parse_args(args):
             raise ValueError('ERROR: --rdrweight must be within [0, 1]!')
         if args.perm < 1 or not 0 < args.permq <= 100 or args.floormargin <= 0 or args.maxclones < 1:
             raise ValueError('ERROR: invalid divisive clustering parameters!')
+    if args.groups is not None:
+        if args.clustering != 'divisive':
+            raise ValueError('ERROR: --groups needs --clustering divisive!')
+        if not os.path.isfile(args.groups):
+            raise ValueError('ERROR: groups file does not exist: {}'.format(args.groups))
     if args.seed and args.seed < 0:
         raise ValueError("Random seed must be positive or zero!")
     else:
@@ -74,6 +82,9 @@ def parse_args(args):
         'seed' : args.seed,
         'weighted' : args.weighted,
         'clustering' : args.clustering,
+        'groups' : args.groups,
+        'pseudobulk' : args.clustering == 'divisive' and not args.nopseudobulk,
+        'maxploidy' : args.maxploidy,
         'divisive' : {'rdr_weight' : args.rdrweight, 'noise_scale' : args.noisescale, 'n_perm' : args.perm, 'q' : args.permq,
                       'margin' : args.floormargin, 'ashman' : args.ashman, 'peel' : args.peel,
                       'max_clusters' : args.maxclones, 'reassign' : not args.noreassign,
@@ -91,7 +102,10 @@ def main(args=None, stdout_file=None):
 
     log('Clustering cells in clones')
     weights = binweights(pos) if args['weighted'] else None
-    if args['clustering'] == 'divisive':
+    if args['clustering'] == 'divisive' and args['groups']:
+        log('Taking the cell groups from {}'.format(args['groups']))
+        clus = given_groups(args['groups'], cells)
+    elif args['clustering'] == 'divisive':
         clus = divisive_clustering(args['input'], cells, args['minsize'], args['seed'], args['divisive'])
     else:
         clus = clustering(cns, pos, cells, args['maxdiff'], args['linkage'], weights)
@@ -107,7 +121,15 @@ def main(args=None, stdout_file=None):
 
     log('Profiling clones')
     profiles = profiling(cns, clus)
-    
+    if args['pseudobulk'] and len(clones) > 0:
+        log('Calling every clone on its pooled reads (pseudobulk)')
+        pb = pseudobulk_profiles(args['input'], clus, clones, args['maxploidy'], args['seed'])
+        for b in profiles:
+            for k, state in pb.get(b, {}).items():
+                profiles[b][k] = state
+        log('Pseudobulk calls replace the majority vote for {} clones (files pseudobulk_*.tsv next to the calls)'.format(
+            len(set(clus[e] for e in clones))), level='INFO')
+
     log('Writing clone map')
     header = '\t'.join(['#CELL', 'CLUSTER', 'CLONE'])
     if stdout_file is not None:
@@ -199,6 +221,85 @@ def divisive_clustering(path, cells, minsize, seed, opts):
             clus[e] = nxt
             nxt += 1
     return clus
+
+
+def given_groups(path, cells):
+    """CELL GROUP file -> {cell : cluster id from 1}; group None (noisy cells) -> a cluster of its own."""
+    names, clus = {}, {}
+    with open(path) as f:
+        for l in f:
+            p = l.split()
+            if not p or p[0].startswith('#'):
+                continue
+            if p[1] != 'None' and p[1] not in names:
+                names[p[1]] = len(names) + 1
+            clus[p[0]] = names[p[1]] if p[1] != 'None' else None
+    missing = [e for e in cells if e not in clus]
+    if missing:
+        raise ValueError('{} cells have no group in {} (e.g. {})'.format(len(missing), path, missing[0]))
+    nxt = len(names) + 1
+    out = {}
+    for e in cells:
+        if clus[e] is None:
+            out[e] = nxt
+            nxt += 1
+        else:
+            out[e] = clus[e]
+    return out
+
+
+def pseudobulk_profiles(path, clus, clones, maxploidy, seed):
+    """Every clone as one pseudo-cell (its cells' reads and allele counts summed per bin), called by Caller with
+    the bins' clusters of the input -> {bin : {cluster id : (a, b)}}. Writes pseudobulk_combo.tsv,
+    pseudobulk_clusters.tsv, pseudobulk_calls.tsv (and Caller's log) next to the input calls."""
+    from Caller import main as caller_main
+    out_dir = os.path.dirname(os.path.abspath(path))
+    pb = (lambda name : os.path.join(out_dir, name))
+    clone_of = {e : clus[e] for e in clones}
+    count, acount, bcount = defaultdict(float), defaultdict(float), defaultdict(float)
+    norm, bincluster, order = {}, {}, []
+    with open(path) as f:
+        for l in f:
+            if l[0] == '#':
+                continue
+            p = l.split()
+            b = (p[0], int(p[1]), int(p[2]))
+            if b not in norm:
+                norm[b] = float(p[4])
+                bincluster[b] = p[10]
+                order.append(b)
+            k = clone_of.get(p[3])
+            if k is None:
+                continue
+            count[(k, b)] += float(p[5])
+            acount[(k, b)] += float(p[7])
+            bcount[(k, b)] += float(p[8])
+    ks = sorted(set(clone_of.values()))
+    tn = sum(norm.values())
+    tk = {k : sum(count[(k, b)] for b in order) for k in ks}
+    with open(pb('pseudobulk_combo.tsv'), 'w') as o:
+        for b in order:
+            for k in ks:
+                c, a, bb = count[(k, b)], acount[(k, b)], bcount[(k, b)]
+                rdr = (c / tk[k]) / (norm[b] / tn) if tk[k] > 0 and norm[b] > 0 else 0.0
+                baf = bb / (a + bb) if a + bb > 0 else 0.5
+                o.write('\t'.join(map(str, [b[0], b[1], b[2], 'Clone{}'.format(k), int(norm[b]), int(c), rdr, int(a), int(bb), baf])) + '\n')
+    with open(pb('pseudobulk_clusters.tsv'), 'w') as o:
+        o.write('#CHR\tSTART\tEND\tCLUSTER\n')
+        for b in order:
+            o.write('{}\t{}\t{}\t{}\n'.format(b[0], b[1], b[2], bincluster[b]))
+    cargs = [pb('pseudobulk_combo.tsv'), '--clusters', pb('pseudobulk_clusters.tsv'), '-P', str(maxploidy), '-j', '1']
+    if seed is not None:
+        cargs += ['--seed', str(seed)]
+    caller_main(args=cargs, stdout_file=pb('pseudobulk_calls.tsv'))
+    out = defaultdict(dict)
+    with open(pb('pseudobulk_calls.tsv')) as f:
+        for l in f:
+            if l[0] == '#':
+                continue
+            p = l.split()
+            out[(p[0], int(p[1]), int(p[2]))][int(p[3][len('Clone'):])] = tuple(map(int, p[11].split('|')))
+    return out
 
 
 def selecting(clus, minsize):

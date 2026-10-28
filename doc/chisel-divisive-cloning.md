@@ -1,5 +1,21 @@
 # Divisive cloning (Cloner --clustering divisive)
 
+**Defaults (chisel, chisel_calling, chisel_cloning):** cells are grouped by divisive clustering on their
+RDR and BAF *before* calling (`calls/cellgroups.tsv`, log `calls/cellgroups.log`; very noisy cells get
+group `None`). With `--hmm`, bins are clustered on the groups' pooled reads (`--hmmgroups`, noisy cells
+left out). The clones are those groups. Corrected copy numbers come from calling every clone's pooled
+reads (pseudobulk): each clone becomes one pseudo-cell (reads and allele counts summed per bin) and is
+called by Caller with the run's own bin clusters (`calls/pseudobulk_combo.tsv`, `_clusters.tsv`,
+`_calls.tsv`); every cell gets its clone's call, noisy cells keep their own. A majority vote of noisy
+single-cell calls can only be as good as the majority: an event most single cells miss (e.g. a 1-bin
+deletion at a few SNP reads) is erased by the vote and kept by the pooled reads.
+
+**Legacy switches:** `--nopseudobulk` keeps the divisive groups but clusters bins on every cell and
+corrects by majority vote; `--cloning hamming` is CHISEL's original cloning (and no pseudobulk, which
+needs the groups). Cloner.py alone: `--clustering divisive|hamming`, `--groups FILE`, `--nopseudobulk`,
+`-P` (ploidy of the pseudobulk calling).
+
+
 (See also [chisel-cloning.md](chisel-cloning.md) for the `chisel_cloning` command, which re-runs only the cloning.)
 
 CHISEL's Cloner groups cells by the Hamming distance between their called copy-number states over the
