@@ -13,7 +13,8 @@ import pytest
 from chisel.HMMClusterizer import (GaussianHMM, BinData, forward_backward, viterbi, tied_transmat, kmeans,
                                    silhouette, standardize, pairwise_distances, select_model, make_samples,
                                    sequence_lengths, read_table, read_groups, demo_data, adjusted_rand,
-                                   relabel_by_position, write_table)
+                                   relabel_by_position, write_table, count_samples, CountNoise,
+                                   write_noise_report)
 
 
 def random_model(K, D, rng, transmat='free'):
@@ -450,3 +451,167 @@ def test_caller_with_given_clusters():
         f.write('chr1\t0\t1000000\tnormal\n')
     with pytest.raises(ValueError):
         caller_main(args=[combo, '--clusters', given], stdout_file=out)
+
+
+# ============================================================================================
+# counting noise (GaussianHMM noise='counting')
+# ============================================================================================
+def overdispersed_table(seed=0, nb=600, phi=3.0, groups=(('G1', 400), ('G2', 400), ('G3', 200))):
+    """One pseudobulk 'cell' per group; bins 20-45 kb in dense patches, 80-125 kb elsewhere; negative-binomial
+    reads (variance phi x Poisson), Poisson normal, binomial SNP reads. Events: G1 120-239 CN 3|1 (crosses
+    dense patches), G2 300-327 2|1, G3 400-403 1|2, G2+G3 450-452 2|1, G1 520 1|0 (1 bin). -> BinData, truth."""
+    rng = np.random.RandomState(seed)
+    dense = np.zeros(nb, dtype=bool)
+    for s0 in (50, 180, 330, 480):
+        dense[s0:s0 + 40] = True
+    L = np.where(dense, rng.uniform(20e3, 45e3, nb), rng.uniform(80e3, 125e3, nb))
+    ends = np.cumsum(L).astype(int)
+    starts = np.concatenate([[0], ends[:-1]])
+    names = [g for g, _ in groups]
+    cn = {g: np.tile([1, 1], (nb, 1)) for g in names}
+    for a, b, gs, st in ((120, 239, ('G1',), (3, 1)), (300, 327, ('G2',), (2, 1)), (400, 403, ('G3',), (1, 2)),
+                         (450, 452, ('G2', 'G3'), (2, 1)), (520, 520, ('G1',), (1, 0))):
+        for g in gs:
+            cn[g][a:b + 1] = st
+    prof = [tuple(tuple(cn[g][i]) for g in names) for i in range(nb)]
+    ids = {}
+    truth = np.array([ids.setdefault(p_, len(ids)) for p_ in prof])
+    N = rng.poisson(L / 1e3 * 60).astype(float)
+    rdr, baf, A, B, w = (np.zeros((nb, len(names))) for _ in range(5))
+    for j, (g, ncell) in enumerate(groups):
+        tot = cn[g].sum(axis=1) / 2.0
+        lam = ncell * 0.6 * L / 1e3 * tot
+        r = lam / (phi - 1.0)
+        C = rng.poisson(rng.gamma(r, lam / r))
+        n = rng.poisson(8 * ncell * tot / 2.0)
+        p_ = cn[g][:, 1] / np.maximum(cn[g].sum(axis=1), 1).astype(float)
+        Bc = rng.binomial(n, p_)
+        w[:, j], B[:, j], A[:, j] = C, Bc, n - Bc
+        rdr[:, j] = C / np.maximum(N, 1) * (N.sum() / float(C.sum()))
+        baf[:, j] = np.where(n > 0, Bc / np.maximum(n, 1.0), 0.5)
+    data = BinData(['chr1'] * nb, starts, ends, names, rdr, baf, A, B, w, N)
+    return data, truth, L
+
+
+def test_count_samples_pools_reads_and_its_variances_match_simulated_counts():
+    # many replicates of one bin: the empirical variance of the pooled RDR and BAF equals CountNoise.s2
+    # (many bins, so the genome-wide totals are effectively fixed, as the derivation assumes)
+    rng = np.random.RandomState(3)
+    reps, nb = 3000, 400
+    Nexp, Cexp, n, p_ = 3000.0, 20000.0, 1500, 1.0 / 3.0
+    X_r, X_b = [], []
+    for _ in range(reps):
+        N = rng.poisson(Nexp, nb).astype(float)
+        C = rng.poisson(Cexp, (nb, 2)).astype(float)            # two cells of one group
+        Bc = rng.binomial(n, p_, (nb, 2)).astype(float)
+        T = C.sum(axis=0)
+        rdr = C / N[:, None] * (N.sum() / T)[None, :]
+        data = BinData(['chr1'] * nb, np.arange(nb) * 10, np.arange(1, nb + 1) * 10, ['a', 'b'], rdr, Bc / n, n - Bc, Bc, C, N)
+        X, names, cn = count_samples(data, groups=[('g', np.array([0, 1]))])
+        X_r.append(X[0, 1])
+        X_b.append(X[0, 0])
+    mu = np.mean(X_r)
+    s2 = cn.s2(np.array([np.mean(X_b), mu]))[0]
+    assert abs(np.var(X_r) / s2[1] - 1) < 0.1                     # RDR: Poisson reads of the group and of the normal
+    assert abs(np.var(X_b) / s2[0] - 1) < 0.1                     # BAF: binomial SNP reads
+    sa, sc = cn.parts(np.array([np.mean(X_b), mu]))
+    assert sc[0, 0] == 0 and sc[0, 1] > sa[0, 1]                 # the normal's part is RDR only (and larger here)
+
+
+def test_counting_density_with_the_shared_normal_factor_is_the_full_gaussian():
+    from scipy.stats import multivariate_normal
+    rng = np.random.RandomState(0)
+    N, G = 4, 3
+    a = rng.uniform(1e-4, 1e-3, (N, 2 * G))
+    c = np.zeros((N, 2 * G))
+    c[:, 1::2] = rng.uniform(1e-4, 5e-4, (N, 1))
+    is_baf = np.zeros(2 * G, dtype=bool)
+    is_baf[0::2] = True
+    cn = CountNoise(a, c, is_baf, np.ones((N, 2 * G), dtype=bool))
+    m = GaussianHMM(2, noise='counting', count_noise=cn)
+    m.means = rng.uniform(0.3, 1.5, (2, 2 * G))
+    m.means[:, 0::2] = rng.uniform(0.2, 0.8, (2, G))
+    m.tau2, m.phi = rng.uniform(1e-5, 1e-4, 2 * G), rng.uniform(1, 3, 2 * G)
+    X = m.means[0] + rng.normal(0, 0.02, (N, 2 * G))
+    fast = m.log_emissions(X)
+    for k in range(2):
+        sa, sc = cn.parts(m.means[k])
+        for b in range(N):
+            S = np.diag(m.tau2 + m.phi * sa[b]) + np.outer(np.sqrt(sc[b]), np.sqrt(sc[b]))
+            assert abs(fast[b, k] - multivariate_normal(m.means[k], S).logpdf(X[b])) < 1e-8
+
+
+def test_counting_noise_finds_every_cluster_by_bic_on_overdispersed_variable_length_bins():
+    data, truth, L = overdispersed_table()
+    X, names, cn = count_samples(data)
+    lengths = sequence_lengths(data.chrs, data.starts, data.ends)
+    res = select_model(X, lengths, mink=3, maxk=8, restarts=3, noise='counting', count_noise=cn, seed=1)
+    assert res['K'] == truth.max() + 1                            # 6 clusters, the 1-bin deletion included
+    assert adjusted_rand(truth, res['labels']) > 0.99
+    rdr_phi = res['model'].phi[1::2]
+    assert ((rdr_phi > 2.0) & (rdr_phi < 4.5)).all()             # simulated overdispersion: 3
+    assert (res['model'].phi >= 1.0).all()                       # counting noise is a floor
+    # normal is one state for short and long bins alike
+    normal = truth == 0
+    assert len(set(res['labels'][normal])) == 1
+
+
+def test_counting_noise_reseeds_a_duplicate_state_onto_a_one_bin_event():
+    data, truth, L = overdispersed_table(seed=2)
+    X, names, cn = count_samples(data)
+    lengths = sequence_lengths(data.chrs, data.starts, data.ends)
+    K = truth.max() + 1
+    found = 0
+    for s in range(3):
+        m = GaussianHMM(K, noise='counting', count_noise=cn).init(X, np.random.RandomState(s)).fit(X, lengths)
+        labels = m.decode(X, lengths)[1]
+        one_bin = truth == truth[520]
+        found += int(len(set(labels[one_bin])) == 1 and (labels == labels[520]).sum() == 1)
+    assert found == 3
+
+
+def test_noise_report(tmp_path=None):
+    tmp = tempfile.mkdtemp()
+    data, truth, L = overdispersed_table(nb=200)
+    X, names, cn = count_samples(data)
+    lengths = sequence_lengths(data.chrs, data.starts, data.ends)
+    res = select_model(X, lengths, mink=3, maxk=3, restarts=1, noise='counting', count_noise=cn)
+    path = os.path.join(tmp, 'noise.tsv')
+    write_noise_report(path, data, names, X, res['labels'], res['model'], cn)
+    with open(path) as f:
+        head = f.readline().lstrip('#').split()
+        rows = [l.split('\t') for l in f]
+    assert head == ['CHR', 'START', 'END', 'LENGTH', 'NORM_COUNT', 'STATE', 'SAMPLE', 'FEATURE', 'X', 'MEAN',
+                    'COUNT_VAR', 'TAU2', 'PHI', 'MODEL_VAR', 'RESID2', 'VALID']
+    assert len(rows) == data.nbins * X.shape[1]
+    r = rows[0]
+    assert float(r[13]) >= float(r[10]) * 0.999                  # model variance >= counting variance (phi >= 1)
+
+
+def test_legacy_noise_is_the_class_default_and_counting_needs_counts():
+    assert GaussianHMM(3).noise == 'legacy'
+    with pytest.raises(ValueError):
+        GaussianHMM(3, noise='counting')
+    data, truth = demo_data()
+    with pytest.raises(ValueError):
+        count_samples(data)                                       # the demo has no read counts
+
+
+@pytest.mark.skipif(__import__('sys').version_info[0] >= 3, reason='Caller.py is Python 2.7 code')
+def test_caller_noise_option_and_report():
+    from chisel.Caller import main as caller_main, parse_args
+    tmp = tempfile.mkdtemp()
+    combo = os.path.join(tmp, 'combo.tsv')
+    write_combo(combo)
+    assert parse_args([combo, '--clustering', 'hmm'])['hmm']['noise'] == 'counting'
+    assert parse_args([combo, '--clustering', 'hmm', '--hmmnoise', 'legacy'])['hmm']['noise'] == 'legacy'
+    for noise in ('counting', 'legacy'):
+        d = os.path.join(tmp, noise)
+        os.mkdir(d)
+        caller_main(args=[combo, '-j', '1', '--seed', '1', '--clustering', 'hmm', '--hmmk', '3', '--hmmrestarts', '2',
+                          '--hmmnoise', noise, '--hmmreport', os.path.join(d, 'hmm_selection.tsv')],
+                    stdout_file=os.path.join(d, 'calls.tsv'))
+        with open(os.path.join(d, 'hmm_noise.tsv')) as f:
+            head = f.readline()
+            first = f.readline().split('\t')
+        assert head.startswith('#CHR') and (first[11] == 'NA') == (noise == 'legacy')

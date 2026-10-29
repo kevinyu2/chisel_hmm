@@ -53,6 +53,7 @@ def parse_args(args):
     hmm.add_argument("--hmmbicparams", type=str, default='hmmlearn', choices=['hmmlearn', 'tied'], help="Parameter count for BIC (default: hmmlearn, as HATCHet2)")
     hmm.add_argument("--hmmtiedupdate", type=str, default='exact', choices=['exact', 'hatchet'], help="Stay-probability update for diag transitions (default: exact)")
     hmm.add_argument("--hmmiter", type=int, default=10, help="Maximum EM iterations (default: 10)")
+    hmm.add_argument("--hmmnoise", type=str, default='counting', choices=['counting', 'legacy'], help="Emission variances: counting = known read-count noise of every bin plus one extra variance per feature shared by all states; legacy = every state its own variances (default: counting)")
     hmm.add_argument("--hmmreport", type=str, default=None, help="Write the per-K model-selection table here (default: only in the log)")
     args = parser.parse_args(args)
 
@@ -121,7 +122,7 @@ def parse_args(args):
         'hmm' : {'mink' : args.hmmmink, 'maxk' : args.hmmmaxk, 'criterion' : args.hmmselect, 'restarts' : args.hmmrestarts,
                  'tau' : args.hmmtau, 'transmat' : args.hmmtransmat, 'decode' : args.hmmdecode, 'baf' : args.hmmbaf,
                  'split' : args.hmmsplit, 'groups' : args.hmmgroups, 'bic_params' : args.hmmbicparams,
-                 'tied_update' : args.hmmtiedupdate, 'n_iter' : args.hmmiter, 'report' : args.hmmreport,
+                 'tied_update' : args.hmmtiedupdate, 'n_iter' : args.hmmiter, 'report' : args.hmmreport, 'noise' : args.hmmnoise,
                  'seed' : args.seed if args.seed is not None else 0, 'j' : args.jobs}
     }
 
