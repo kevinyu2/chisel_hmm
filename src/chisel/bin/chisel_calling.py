@@ -13,6 +13,7 @@ import chisel
 src = os.path.dirname(chisel.__file__)
 from ..Utils import *
 from ..HMMClusterizer import add_driver_arguments, driver_options, caller_flags
+from ..CellClusterer import add_split_arguments, split_flags
 
 
 def parse_args():
@@ -28,6 +29,7 @@ def parse_args():
     parser.add_argument("--clusters", required=False, type=str, default=None, help="Take the bin clusters from this file (CHR START END CLUSTER) instead of computing them, e.g. oracle clusters for diagnosis (default: none)")
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Length-weighted distance between cells when cloning, as chisel uses with variable-length bins (--varbins/--bins) (default: disabled)")
     add_driver_arguments(parser)
+    add_split_arguments(parser)
     parser.add_argument("--cloning", required=False, type=str, default='divisive', choices=['divisive', 'hamming'], help="Grouping of cells into clones: divisive = top-down splitting on RDR and BAF with permutation-tested splits, computed before calling (calls/cellgroups.tsv); hamming = CHISEL's original clustering of the called states, after calling (implies --nopseudobulk) (default: divisive)")
     parser.add_argument("--nopseudobulk", required=False, default=False, action='store_true', help="With divisive cloning: cluster bins (--hmm) on every cell instead of the cell groups' pooled reads, and correct copy numbers by majority vote of each clone's cells instead of calling its pooled reads (default: pseudobulk)")
     args = parser.parse_args()
@@ -65,6 +67,8 @@ def parse_args():
         "hmmopts" : hmmopts,
         "cloning" : args.cloning,
         "pseudobulk" : args.cloning == 'divisive' and not args.nopseudobulk,
+        "permq" : args.permq,
+        "floormargin" : args.floormargin,
         "minsize" : 14,
         "clusters" : os.path.abspath(args.clusters) if args.clusters else None
     }
@@ -88,6 +92,7 @@ def main():
     if args['cloning'] == 'divisive':
         log('Grouping cells (divisive clustering on RDR and BAF)', level='PROGRESS')
         cmd = 'python2.7 {} {} -s {}'.format(get_comp('CellClusterer.py'), args['INPUT'], args['minsize'])
+        cmd += split_flags(args)
         if args['seed'] is not None:
             cmd += " --seed {}".format(args['seed'])
         runcmd(cmd, dcal, out='cellgroups.tsv', log='cellgroups.log')
@@ -115,6 +120,8 @@ def main():
     if args['weighted']:
         cmd += " --weighted"
     cmd += " --clustering {} -P {}".format(args['cloning'], args['maxploidy'])
+    if args['cloning'] == 'divisive':
+        cmd += split_flags(args)
     if groups is not None:
         cmd += " --groups {}".format(os.path.abspath(groups))
     if not args['pseudobulk']:

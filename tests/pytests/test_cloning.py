@@ -9,7 +9,7 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from chisel.CellClusterer import bimodal, mode_split, signal_pcs, divisive, kmeans, read_features, feature_matrix, noisy_cells
+from chisel.CellClusterer import signal_pcs, divisive, kmeans, read_features, feature_matrix, noisy_cells
 
 PY2 = sys.version_info[0] == 2
 
@@ -23,22 +23,6 @@ def ari(a, b):
     sij, sa, sb, n = comb(t).sum(), comb(t.sum(1)).sum(), comb(t.sum(0)).sum(), comb(len(a))
     exp = sa * sb / n
     return (sij - exp) / ((sa + sb) / 2.0 - exp)
-
-
-def test_bimodal_separates_one_hump_from_two():
-    rng = np.random.RandomState(0)
-    assert not bimodal(rng.normal(0, 1, 400))[0]
-    assert not bimodal(np.r_[rng.normal(0, 1, 300), rng.normal(0, 3, 100)])[0]     # heavy tails, one hump
-    assert bimodal(np.r_[rng.normal(0, 1, 200), rng.normal(6, 1, 200)])[0]
-
-
-def test_mode_split_cuts_between_modes():
-    rng = np.random.RandomState(7)
-    assert mode_split(rng.normal(0, 1, 300))[0] is None                            # one mode: no split
-    y = np.r_[rng.normal(0, 1, 100), rng.normal(5, 1, 100), rng.normal(10, 1, 100)]
-    side, info = mode_split(y)                                                       # three modes on a line
-    assert info['k'] == 3 and sorted(np.bincount(side)) == [100, 200]                # cut between modes, not through one
-    assert (side[:100] == side[0]).all() and (side[100:200] == side[100]).all() and (side[200:] == side[200]).all()
 
 
 def test_permutation_test_finds_shared_structure_only():
@@ -62,6 +46,11 @@ def profiles(design, rng, n_feat=300, noise=1.0):
     return np.vstack(rows), np.array(labels)
 
 
+def purity(truth, labels):
+    """Share of the cells of every cluster in its majority clone (lowest over clusters)."""
+    return min(np.bincount(truth[labels == k]).max() / float((labels == k).sum()) for k in np.unique(labels))
+
+
 @pytest.mark.parametrize('name, design', [
     ('nested', [(150, {(0, 90): 1.2}), (150, {(100, 115): 1.0}), (80, {(150, 165): 1.0})]),      # one big, two small
     ('collinear', [(100, {}), (100, {(50, 70): 1.0}), (100, {(50, 70): 2.0})]),                 # 1|1, 2|1, 3|1-like
@@ -69,9 +58,27 @@ def profiles(design, rng, n_feat=300, noise=1.0):
 def test_divisive_recovers_clones(name, design):
     X, truth = profiles(design, np.random.RandomState(3))
     labels, log = divisive(X, np.random.RandomState(4), n_perm=10)
-    assert labels.max() + 1 == 3, '\n'.join(log)
-    # adjacent collinear clones are ~4.7 noise SDs apart on PC1: a few cells land with a neighbour
-    assert ari(truth, labels) > 0.9, '\n'.join(log)
+    # every clone found, no cluster mixing clones; 2-means may cut a clone on a line in two (oversplitting)
+    assert 3 <= labels.max() + 1 <= 4, '\n'.join(log)
+    assert len(set(np.bincount(truth[labels == k]).argmax() for k in np.unique(labels))) == 3, '\n'.join(log)
+    assert purity(truth, labels) > 0.9, '\n'.join(log)
+    if name == 'nested':
+        assert labels.max() + 1 == 3 and ari(truth, labels) > 0.9, '\n'.join(log)
+
+
+def test_reassignment_uses_the_split_directions():
+    """Nested clones found and kept by the reassignment in the directions of the splits; overlapping
+    directions count once; k-means there moves a cell to the nearer centre."""
+    from chisel.CellClusterer import split_space, reassign_in
+    rng = np.random.RandomState(5)
+    X, truth = profiles([(200, {(0, 150): 1.0}), (150, {(200, 240): 1.5}), (150, {})], rng, n_feat=1000)
+    labels, log = divisive(X, np.random.RandomState(6), n_perm=10)
+    assert labels.max() + 1 == 3 and ari(truth, labels) > 0.95, '\n'.join(log)
+    assert any(l.startswith('reassignment') for l in log)
+    d = [np.eye(5)[:2], np.eye(5)[1:3]]                                  # overlapping directions counted once
+    assert split_space(d).shape == (3, 5)
+    lab, moves, rank = reassign_in(np.r_[np.zeros((5, 5)), np.ones((5, 5))], np.r_[[0] * 4, [1] * 6], [np.ones((1, 5)) / np.sqrt(5)])
+    assert rank == 1 and moves == 1 and (lab == np.r_[[0] * 5, [1] * 5]).all()
 
 
 def test_noisy_cells_are_set_apart_and_do_not_hide_a_clone():
@@ -261,3 +268,20 @@ def test_cloner_takes_given_groups():
         f.readline()
         clone = {l.split()[0]: l.split()[2] for l in f}
     assert clone['cell000'] == 'None' and len(set(v for v in clone.values() if v != 'None')) == 3
+
+
+def test_split_test_defaults_and_driver_options():
+    """One set of split-test defaults (90, 1.2), shared by the drivers, Cloner and CellClusterer, and passed on as flags."""
+    import argparse
+    import inspect
+    from chisel.CellClusterer import PERM_Q, FLOOR_MARGIN, add_split_arguments, split_flags
+    assert (PERM_Q, FLOOR_MARGIN) == (90.0, 1.2)
+    spec = inspect.getargspec(divisive) if PY2 else inspect.getfullargspec(divisive)
+    d = dict(zip(spec.args[-len(spec.defaults):], spec.defaults))
+    assert (d['q'], d['margin']) == (PERM_Q, FLOOR_MARGIN) and 'ashman' not in d
+    p = argparse.ArgumentParser()
+    add_split_arguments(p)
+    a = p.parse_args([])
+    assert (a.permq, a.floormargin) == (PERM_Q, FLOOR_MARGIN)
+    a = p.parse_args(['--floormargin', '1.5'])
+    assert split_flags(a) == split_flags(vars(a)) == ' --permq 90.0 --floormargin 1.5'

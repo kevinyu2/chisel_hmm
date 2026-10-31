@@ -8,33 +8,36 @@ units of expected counting noise (Poisson on the cell's and the normal's reads f
 the cell's SNP reads for BAF). The RDR block and the BAF block are scaled to total variance 1 and
 weighted rdr_weight : 1 - rdr_weight, so within a block bins keep their own variance.
 
-Starting from all cells, a group is split in two when all of these hold:
+Starting from all cells, a group is split in two when both of these hold:
   * signal: PCA of the group's own cells has at least one PC whose variance beats a noise floor by
     floor_margin, the floor being the perm_q percentile of the top PC variance over perm matrices in
     which every feature's values are shuffled across the group's cells (Horn's parallel analysis:
     each feature keeps its own noise, shared structure such as a clone is destroyed);
-  * modes: the cells are projected on one line (the signal PC, or with several the line between
-    the two centres of 2-means on the signal PCs) and 1 to 4 Gaussians are fitted to it, the number
-    chosen by BIC; with more than one, the cut goes between the two neighbouring Gaussians that are
-    furthest apart, which must be apart (Ashman's D = |mu1 - mu2| sqrt(2 / (s1^2 + s2^2)) >= ashman).
-    Cutting between modes rather than by 2-means matters when clones lie on one line (the same
-    segment at 1|1, 2|1, 3|1): 2-means then prefers to cut through the middle clone;
+  Then the cells are cut in two by 2-means on their scores on the signal PCs.
   * size: both halves have >= min_size cells. When 2-means cuts off fewer cells (outliers), those
     are set aside and the split retried (up to peel times); set-aside cells join the nearer half.
+2-means may cut through a clone (e.g. the middle one of three clones on a line), which then ends up
+in two clusters: oversplitting, which is preferred to two clones sharing a cluster.
 Very noisy cells are set apart first (outlier_z): a cell's noise level is the median absolute
 deviation of its values over all features, which a few event bins barely change; cells more than
 outlier_z robust SDs above the typical level are left out of the splits, the noise floors and the
 reassignment (label -1). Noisy cells inside a group would otherwise raise its noise floor and hide a
 clone, and drag cluster centres.
-Groups that do not split are the clusters; finally every cell is reassigned to the nearest cluster
-centre in the top PCs of all cells, repeated until stable (corrects cells sent the wrong way by an
-early split). Re-running PCA inside every group lets small differences become the main signal once
+Groups that do not split are the clusters. Finally k-means with one centre per cluster, started at
+the clusters' means, reassigns the cells in the space of the signal PCs that the splits used (their
+directions in feature space, together; corrects cells sent the wrong way by an early split). Those are
+the directions in which clusters differ, including small differences that are not among the top PCs
+of all cells, and leaving out the rest keeps the distances from being dominated by noise. Re-running PCA inside every group lets small differences become the main signal once
 large ones are separated, which suits nested (tree-like) clones and clones that differ by the same
 segment at different copy numbers.
 """
 from __future__ import division, print_function
 
 import numpy as np
+
+# Defaults of the split test (shared by Cloner.py and the chisel drivers).
+PERM_Q = 90.0        # noise floor = this percentile of the permuted top PC variance
+FLOOR_MARGIN = 1.2   # a signal PC must beat the noise floor by this factor
 
 
 def read_features(path):
@@ -109,12 +112,13 @@ def kmeans(X, K, rng, n_init=20, iters=300):
     return best
 
 
-def signal_pcs(X, rng, n_perm=20, q=95.0, margin=1.5, max_pcs=20):
-    """Horn's parallel analysis -> (number of signal PCs, PC scores, PC variances, noise floor)."""
+def signal_pcs(X, rng, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN, max_pcs=20):
+    """Horn's parallel analysis -> (number of signal PCs, PC scores, PC variances, noise floor, PC directions
+    in feature space: one per row)."""
     from scipy.sparse.linalg import svds
     Xc = X - X.mean(axis=0)
     n = Xc.shape[0]
-    U, S, _ = np.linalg.svd(Xc, full_matrices=False)
+    U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
     var = S ** 2 / max(n - 1, 1)
     top = []
     cols = np.arange(Xc.shape[1])
@@ -123,79 +127,7 @@ def signal_pcs(X, rng, n_perm=20, q=95.0, margin=1.5, max_pcs=20):
         top.append(svds(Xc[idx, cols], k=1, return_singular_vectors=False)[0] ** 2 / max(n - 1, 1))
     floor = float(np.percentile(top, q)) * margin
     k = min(max_pcs, len(S))
-    return int((var > floor).sum()), U[:, :k] * S[:k], var, floor
-
-
-def bimodal(y, min_d=2.0):
-    """1-D: two Gaussians better than one by BIC, and apart (Ashman's D >= min_d)? -> (bool, BIC1 - BIC2, D)."""
-    y = np.asarray(y, float)
-    n = len(y)
-    v = max(y.var(), 1e-12)
-    ll1 = -0.5 * n * (np.log(2 * np.pi * v) + 1)
-    lab = y > np.median(y)
-    if lab.all() or not lab.any():
-        return False, 0.0, 0.0
-    w = np.array([1 - lab.mean(), lab.mean()])
-    mu = np.array([y[~lab].mean(), y[lab].mean()])
-    va = np.array([max(y[~lab].var(), 1e-6 * v), max(y[lab].var(), 1e-6 * v)])
-    for _ in range(200):
-        dens = w / np.sqrt(2 * np.pi * va) * np.exp(-0.5 * (y[:, None] - mu) ** 2 / va)
-        r = dens / np.maximum(dens.sum(1, keepdims=True), 1e-300)
-        nk = np.maximum(r.sum(0), 1e-9)
-        w, mu = nk / n, (r * y[:, None]).sum(0) / nk
-        va = np.maximum((r * (y[:, None] - mu) ** 2).sum(0) / nk, 1e-6 * v)
-    dens = w / np.sqrt(2 * np.pi * va) * np.exp(-0.5 * (y[:, None] - mu) ** 2 / va)
-    ll2 = np.log(np.maximum(dens.sum(1), 1e-300)).sum()
-    delta = (-2 * ll1 + 2 * np.log(n)) - (-2 * ll2 + 5 * np.log(n))
-    d = abs(mu[0] - mu[1]) * np.sqrt(2.0 / (va[0] + va[1]))
-    return bool(delta > 0 and d >= min_d), float(delta), float(d)
-
-
-def gmm1d(y, k, iters=300):
-    """EM for a k-component 1-D Gaussian mixture, started at quantiles -> (weights, means, variances, loglik)."""
-    n = len(y)
-    v = max(y.var(), 1e-12)
-    mu = np.percentile(y, np.linspace(100.0 / (2 * k), 100 - 100.0 / (2 * k), k))
-    va = np.full(k, v / k ** 2)
-    w = np.full(k, 1.0 / k)
-    for _ in range(iters):
-        logd = np.log(w) - 0.5 * np.log(2 * np.pi * va) - 0.5 * (y[:, None] - mu) ** 2 / va
-        mx = logd.max(1, keepdims=True)
-        r = np.exp(logd - mx)
-        r /= r.sum(1, keepdims=True)
-        nk = np.maximum(r.sum(0), 1e-9)
-        w, mu = nk / n, (r * y[:, None]).sum(0) / nk
-        va = np.maximum((r * (y[:, None] - mu) ** 2).sum(0) / nk, 1e-6 * v)
-    logd = np.log(w) - 0.5 * np.log(2 * np.pi * va) - 0.5 * (y[:, None] - mu) ** 2 / va
-    mx = logd.max(1, keepdims=True)
-    ll = float((mx[:, 0] + np.log(np.exp(logd - mx).sum(1))).sum())
-    return w, mu, va, ll, logd
-
-
-def mode_split(y, ashman=2.0, kmax=4):
-    """Split a 1-D sample between modes: Gaussian mixtures with 1..kmax components by BIC; if more than one,
-    cut between the neighbouring pair with the largest Ashman's D. Returns (side 0/1 per value or None, info)."""
-    y = np.asarray(y, float)
-    n = len(y)
-    best = None
-    for k in range(1, kmax + 1):
-        if n < 5 * k:
-            break
-        w, mu, va, ll, logd = gmm1d(y, k)
-        bic = -2 * ll + (3 * k - 1) * np.log(n)
-        if best is None or bic < best[0]:
-            best = (bic, k, mu, va, logd)
-    _, k, mu, va, logd = best
-    if k == 1:
-        return None, {'k': 1, 'D': 0.0}
-    order = np.argsort(mu)
-    mu, va = mu[order], va[order]
-    d = [abs(mu[i + 1] - mu[i]) * np.sqrt(2.0 / (va[i] + va[i + 1])) for i in range(k - 1)]
-    i = int(np.argmax(d))
-    if d[i] < ashman:
-        return None, {'k': k, 'D': float(d[i])}
-    comp = np.argsort(order)[logd.argmax(1)]               # component of every value, in sorted order
-    return (comp > i).astype(int), {'k': k, 'D': float(d[i])}
+    return int((var > floor).sum()), U[:, :k] * S[:k], var, floor, Vt[:k]
 
 
 def noisy_cells(X, z=5.0):
@@ -209,7 +141,7 @@ def noisy_cells(X, z=5.0):
     return spread > centre + z * scale
 
 
-def divisive(X, rng, min_size=14, n_perm=20, q=95.0, margin=1.5, ashman=2.0, peel=5, max_clusters=30, reassign=True,
+def divisive(X, rng, min_size=14, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN, peel=5, max_clusters=30, reassign=True,
              outlier_z=5.0):
     """Top-down clustering of the rows of X -> (labels 0..K-1, -1 for noisy cells set apart; log lines)."""
     log = []
@@ -217,14 +149,14 @@ def divisive(X, rng, min_size=14, n_perm=20, q=95.0, margin=1.5, ashman=2.0, pee
     if noisy.any():
         log.append('{} very noisy cells set apart (noise level > {:g} robust SDs above the typical cell)'.format(int(noisy.sum()), outlier_z))
     keep = np.flatnonzero(~noisy)
-    labels, steps = _divisive(X[keep], rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign)
+    labels, steps = _divisive(X[keep], rng, min_size, n_perm, q, margin, peel, max_clusters, reassign)
     full = np.full(X.shape[0], -1, dtype=int)
     full[keep] = labels
     return full, log + steps
 
 
-def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, reassign):
-    leaves, queue, log = [], [(np.arange(X.shape[0]), 'root', 0)], []
+def _divisive(X, rng, min_size, n_perm, q, margin, peel, max_clusters, reassign):
+    leaves, queue, log, dirs = [], [(np.arange(X.shape[0]), 'root', 0)], [], []
     while queue:
         idx, name, depth = queue.pop(0)
         pad = '  ' * depth
@@ -238,32 +170,18 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
             if len(core) < 2 * min_size:
                 verdict = '{} cells left after setting aside {} outliers -> cluster'.format(len(core), len(peeled))
                 break
-            m, scores, var, floor = signal_pcs(X[core], rng, n_perm, q, margin)
+            m, scores, var, floor, V = signal_pcs(X[core], rng, n_perm, q, margin)
             if m == 0:
                 verdict = 'PC1 variance {:.3g} vs noise floor {:.3g}: no signal PC -> cluster'.format(var[0], floor)
                 break
-            if m == 1:
-                y = scores[:, 0]
-            else:                                          # the line between the centres of 2-means on the signal PCs
-                lab2 = kmeans(scores[:, :m], 2, rng)
-                if min(np.bincount(lab2, minlength=2)) == 0:
-                    y = scores[:, 0]
-                else:
-                    c0, c1 = scores[lab2 == 0, :m].mean(0), scores[lab2 == 1, :m].mean(0)
-                    y = scores[:, :m].dot((c1 - c0) / max(np.linalg.norm(c1 - c0), 1e-12))
-            lab, info = mode_split(y, ashman)
-            if lab is None:
-                verdict = ("{} signal PC(s) (PC1 {:.3g} vs floor {:.3g}) but {} -> cluster").format(
-                    m, var[0], floor, 'one mode (BIC)' if info['k'] == 1 else
-                    "{} modes, none apart (largest Ashman's D {:.2f})".format(info['k'], info['D']))
-                break
+            lab = kmeans(scores[:, :m], 2, rng)
             sizes = np.bincount(lab, minlength=2)
             if sizes.min() < min_size:                  # outliers: set aside, retry on the rest
                 small = int(sizes.argmin())
                 peeled = np.concatenate([peeled, core[lab == small]])
                 core = core[lab != small]
                 continue
-            split = (lab, m, var, floor, info['k'], info['D'])
+            split = (lab, m, var, floor, V[:m])
             break
         else:
             verdict = 'still cutting off < {} cells after {} retries -> cluster'.format(min_size, peel)
@@ -272,48 +190,61 @@ def _divisive(X, rng, min_size, n_perm, q, margin, ashman, peel, max_clusters, r
             log.append('{}{}: {} cells, {}{}'.format(pad, name, len(idx), verdict, note))
             leaves.append(idx)
             continue
-        lab, m, var, floor, nmodes, dd = split
+        lab, m, var, floor, V = split
+        dirs.append(V)
         halves = [core[lab == 0], core[lab == 1]]
         if len(peeled):
             cen = [X[h].mean(0) for h in halves]
             near = np.argmin([((X[peeled] - c) ** 2).sum(1) for c in cen], axis=0)
             halves = [np.concatenate([halves[k], peeled[near == k]]) for k in (0, 1)]
-        log.append("{}{}: {} cells, {} signal PC(s) (PC1 {:.3g} vs floor {:.3g}), {} modes, cut at the widest gap "
-                   "(Ashman's D {:.2f}) -> split {} / {}{}".format(pad, name, len(idx), m, var[0], floor, nmodes, dd,
-                                                                len(halves[0]), len(halves[1]), note))
+        log.append("{}{}: {} cells, {} signal PC(s) (PC1 {:.3g} vs floor {:.3g}) -> 2-means split {} / {}{}".format(
+            pad, name, len(idx), m, var[0], floor, len(halves[0]), len(halves[1]), note))
         queue.append((halves[0], name + '.0', depth + 1))
         queue.append((halves[1], name + '.1', depth + 1))
     labels = np.empty(X.shape[0], dtype=int)
     for i, idx in enumerate(leaves):
         labels[idx] = i
     if reassign and len(leaves) > 1:
-        Xc = X - X.mean(axis=0)
-        U, S, _ = np.linalg.svd(Xc, full_matrices=False)
-        k = min(max(20, len(leaves)), len(S))
-        P = U[:, :k] * S[:k]
-        moves = 0
-        for _ in range(100):
-            C = np.array([P[labels == j].mean(0) for j in range(labels.max() + 1)])
-            new = ((P[:, None, :] - C[None, :, :]) ** 2).sum(2).argmin(1)
-            moved = int((new != labels).sum())
-            if not moved:
-                break
-            moves += moved
-            labels = np.searchsorted(np.unique(new), new)          # drop emptied clusters
-        log.append('reassignment to the nearest cluster centre (top {} PCs of all cells): {} moves, {} clusters'.format(
-            k, moves, labels.max() + 1))
+        labels, moves, rank = reassign_in(X, labels, dirs)
+        log.append('reassignment: k-means from the {} cluster means in the {} directions of the signal PCs the splits '
+                   'used: {} moves, {} clusters'.format(len(leaves), rank, moves, labels.max() + 1))
     return labels, log
 
 
-def cell_groups(path, seed=0, min_size=14, rdr_weight=0.5, noise_scale=False, n_perm=20, q=95.0, margin=1.5,
-                ashman=2.0, peel=5, max_clusters=30, reassign=True, outlier_z=5.0):
+def split_space(dirs, tol=1e-6):
+    """Orthonormal basis (rows) of the span of the split directions (each an m x features array)."""
+    D = np.vstack(dirs)
+    _, S, Vt = np.linalg.svd(D, full_matrices=False)
+    return Vt[S > tol * S[0]]
+
+
+def reassign_in(X, labels, dirs, iters=100):
+    """k-means started at the clusters' means, in the span of the split directions (overlapping directions
+    of nested splits counted once) -> (labels 0..K'-1, cells moved, dimensions). A cluster that loses all
+    its cells is dropped."""
+    Q = split_space(dirs)
+    P = (X - X.mean(axis=0)).dot(Q.T)
+    moves = 0
+    for _ in range(iters):
+        C = np.array([P[labels == j].mean(0) for j in range(labels.max() + 1)])
+        new = ((P[:, None, :] - C[None, :, :]) ** 2).sum(2).argmin(1)
+        moved = int((new != labels).sum())
+        if not moved:
+            break
+        moves += moved
+        labels = np.searchsorted(np.unique(new), new)          # drop emptied clusters
+    return labels, moves, Q.shape[0]
+
+
+def cell_groups(path, seed=0, min_size=14, rdr_weight=0.5, noise_scale=False, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN,
+                peel=5, max_clusters=30, reassign=True, outlier_z=5.0):
     """Divisive groups of the cells of a combo.tsv or calls.tsv -> (OrderedDict cell -> group name, log lines).
     Groups are Group1, Group2, ... by decreasing size; very noisy cells set apart get None."""
     from collections import OrderedDict
     cells, bins, arr = read_features(path)
     X = feature_matrix(arr, rdr_weight=rdr_weight, noise_scale=noise_scale)
     labels, log = divisive(X, np.random.RandomState(seed), min_size=min_size, n_perm=n_perm, q=q, margin=margin,
-                           ashman=ashman, peel=peel, max_clusters=max_clusters, reassign=reassign, outlier_z=outlier_z)
+                           peel=peel, max_clusters=max_clusters, reassign=reassign, outlier_z=outlier_z)
     sizes = np.bincount(labels[labels >= 0]) if (labels >= 0).any() else np.array([], dtype=int)
     rank = {k: i + 1 for i, k in enumerate(np.argsort(-sizes, kind='mergesort'))}
     out = OrderedDict((e, 'Group{}'.format(rank[l]) if l >= 0 else 'None') for e, l in zip(cells, labels))
@@ -321,6 +252,20 @@ def cell_groups(path, seed=0, min_size=14, rdr_weight=0.5, noise_scale=False, n_
         len(cells), len(bins), len(sizes), ', '.join(str(s) for s in sorted(sizes, reverse=True)),
         ', {} noisy cells set apart (None)'.format(int((labels < 0).sum())) if (labels < 0).any() else '')]
     return out, head + log
+
+
+def add_split_arguments(parser):
+    """The split-test options of the chisel drivers (passed on to CellClusterer.py and Cloner.py)."""
+    dv = parser.add_argument_group('divisive cloning', 'The test deciding whether a group of cells is split in two (by 2-means on its signal PCs; --cloning divisive)')
+    dv.add_argument("--permq", type=float, required=False, default=PERM_Q, help="Noise floor = this percentile of the top PC variance of feature-shuffled copies of the group (default: {:g})".format(PERM_Q))
+    dv.add_argument("--floormargin", type=float, required=False, default=FLOOR_MARGIN, help="A signal PC must beat the noise floor by this factor; lower finds smaller clones (default: {:g})".format(FLOOR_MARGIN))
+    return dv
+
+
+def split_flags(args):
+    """Command-line flags of add_split_arguments' options (args: parsed arguments or dict)."""
+    get = (lambda k: args[k]) if isinstance(args, dict) else (lambda k: getattr(args, k))
+    return " --permq {} --floormargin {}".format(get('permq'), get('floormargin'))
 
 
 def main(argv=None):
@@ -334,16 +279,15 @@ def main(argv=None):
     p.add_argument('--rdrweight', type=float, default=0.5)
     p.add_argument('--noisescale', action='store_true')
     p.add_argument('--perm', type=int, default=20)
-    p.add_argument('--permq', type=float, default=95.0)
-    p.add_argument('--floormargin', type=float, default=1.5)
-    p.add_argument('--ashman', type=float, default=2.0)
+    p.add_argument('--permq', type=float, default=PERM_Q)
+    p.add_argument('--floormargin', type=float, default=FLOOR_MARGIN)
     p.add_argument('--peel', type=int, default=5)
     p.add_argument('--maxclones', type=int, default=30)
     p.add_argument('--noreassign', action='store_true')
     p.add_argument('--outlierz', type=float, default=5.0)
     a = p.parse_args(argv)
     groups, log = cell_groups(a.INPUT, seed=a.seed, min_size=a.minsize, rdr_weight=a.rdrweight, noise_scale=a.noisescale,
-                              n_perm=a.perm, q=a.permq, margin=a.floormargin, ashman=a.ashman, peel=a.peel,
+                              n_perm=a.perm, q=a.permq, margin=a.floormargin, peel=a.peel,
                               max_clusters=a.maxclones, reassign=not a.noreassign, outlier_z=a.outlierz)
     sys.stderr.write('Divisive cell groups: ' + '\n'.join(log) + '\n')
     sys.stdout.write('#CELL\tGROUP\n')

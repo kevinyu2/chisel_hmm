@@ -16,6 +16,7 @@ import scipy.cluster.hierarchy as hier
 import scipy.spatial.distance
 
 from Utils import *
+from CellClusterer import PERM_Q, FLOOR_MARGIN
 
 
 def parse_args(args):
@@ -36,9 +37,8 @@ def parse_args(args):
     dv.add_argument("--rdrweight", type=float, default=0.5, help="Weight of RDR vs BAF (1 - w) in the cell distances (default: 0.5)")
     dv.add_argument("--noisescale", default=False, action='store_true', help="Express RDR and BAF in units of their expected counting noise (default: disabled)")
     dv.add_argument("--perm", type=int, default=20, help="Permutations per split test (default: 20)")
-    dv.add_argument("--permq", type=float, default=95.0, help="Noise floor = this percentile of the permuted top PC variance (default: 95)")
-    dv.add_argument("--floormargin", type=float, default=1.5, help="A signal PC must exceed the noise floor by this factor (default: 1.5)")
-    dv.add_argument("--ashman", type=float, default=2.0, help="Minimum Ashman's D between the two halves of a split (default: 2)")
+    dv.add_argument("--permq", type=float, default=PERM_Q, help="Noise floor = this percentile of the permuted top PC variance (default: {:g})".format(PERM_Q))
+    dv.add_argument("--floormargin", type=float, default=FLOOR_MARGIN, help="A signal PC must exceed the noise floor by this factor (default: {:g})".format(FLOOR_MARGIN))
     dv.add_argument("--peel", type=int, default=5, help="Times to set aside small outlier groups and retry a split (default: 5)")
     dv.add_argument("--maxclones", type=int, default=30, help="Stop splitting at this many clusters (default: 30)")
     dv.add_argument("--noreassign", default=False, action='store_true', help="Keep the split tree's assignment, no final reassignment (default: disabled)")
@@ -86,7 +86,7 @@ def parse_args(args):
         'pseudobulk' : args.clustering == 'divisive' and not args.nopseudobulk,
         'maxploidy' : args.maxploidy,
         'divisive' : {'rdr_weight' : args.rdrweight, 'noise_scale' : args.noisescale, 'n_perm' : args.perm, 'q' : args.permq,
-                      'margin' : args.floormargin, 'ashman' : args.ashman, 'peel' : args.peel,
+                      'margin' : args.floormargin, 'peel' : args.peel,
                       'max_clusters' : args.maxclones, 'reassign' : not args.noreassign,
                       'outlier_z' : args.outlierz, 'assign_outliers' : args.assignoutliers}
     }
@@ -204,7 +204,7 @@ def divisive_clustering(path, cells, minsize, seed, opts):
     X = feature_matrix(arr, rdr_weight=opts['rdr_weight'], noise_scale=opts['noise_scale'])
     log('Divisive clustering of {} cells on {} features ({} bins x RDR and BAF)'.format(X.shape[0], X.shape[1], len(bins)), level='INFO')
     labels, steps = divisive(X, np.random.RandomState(seed if seed is not None else 0), min_size=minsize,
-                             n_perm=opts['n_perm'], q=opts['q'], margin=opts['margin'], ashman=opts['ashman'],
+                             n_perm=opts['n_perm'], q=opts['q'], margin=opts['margin'],
                              peel=opts['peel'], max_clusters=opts['max_clusters'], reassign=opts['reassign'],
                              outlier_z=opts['outlier_z'])
     log('Divisive splits:\n' + '\n'.join(steps), level='INFO')

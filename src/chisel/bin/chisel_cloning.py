@@ -12,6 +12,7 @@ import chisel
 
 src = os.path.dirname(chisel.__file__)
 from ..Utils import *
+from ..CellClusterer import add_split_arguments, split_flags
 
 
 def parse_args():
@@ -27,6 +28,7 @@ def parse_args():
     parser.add_argument("--cloning", required=False, type=str, default='divisive', choices=['divisive', 'hamming'], help="Grouping of cells into clones: divisive = top-down splitting on RDR and BAF with permutation-tested splits (Cloner.py --clustering divisive; -s is the minimum clone size); hamming = CHISEL's original clustering of the called states (-f, -r; implies --nopseudobulk) (default: divisive)")
     parser.add_argument("--nopseudobulk", required=False, default=False, action='store_true', help="With divisive cloning: correct copy numbers by majority vote of each clone's cells instead of calling its pooled reads (default: pseudobulk)")
     parser.add_argument("-P", "--maxploidy", required=False, type=int, default=4, help="Maximum ploidy for the pseudobulk calling of the clones (default: 4)")
+    add_split_arguments(parser)
     args = parser.parse_args()
 
     if not os.path.isfile(args.INPUT):
@@ -50,7 +52,9 @@ def parse_args():
         "weighted" : args.weighted,
         "cloning" : args.cloning,
         "pseudobulk" : args.cloning == 'divisive' and not args.nopseudobulk,
-        "maxploidy" : args.maxploidy
+        "maxploidy" : args.maxploidy,
+        "permq" : args.permq,
+        "floormargin" : args.floormargin
     }
 
 
@@ -77,6 +81,8 @@ def main():
     if args['weighted']:
         cmd += " --weighted"
     cmd += " --clustering {} -P {}".format(args['cloning'], args['maxploidy'])
+    if args['cloning'] == 'divisive':
+        cmd += split_flags(args)
     if not args['pseudobulk']:
         cmd += " --nopseudobulk"
     runcmd(cmd, dclo, out='mapping.tsv')

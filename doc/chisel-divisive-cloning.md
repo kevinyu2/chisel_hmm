@@ -37,16 +37,26 @@ python2.7 Cloner.py calls/calls.tsv --clustering divisive [--seed 12] > clones/m
 * Very noisy cells (robust noise level more than `--outlierz` 5 robust SDs above the typical cell) are
   set apart: clone None, own calls (`--assignoutliers` gives them the nearest clone).
 * A group of cells is split in two when its own PCA has a PC beating a permutation noise floor by
-  `--floormargin` 1.5x (every feature shuffled across the group's cells, `--perm` 20 times,
-  `--permq` 95th percentile: Horn's parallel analysis), the cells projected on that direction have
-  several modes (1-4 Gaussians by BIC) with a clear gap (Ashman's D >= `--ashman` 2, the cut placed in
-  the widest gap), and both halves have >= `--minsize` 14 cells (small outlier groups are set aside
-  and the split retried, `--peel`). Groups that do not split are the clones (at most `--maxclones`).
-* Finally cells are reassigned to the nearest clone centre (`--noreassign` to skip).
+  `--floormargin` 1.2x (every feature shuffled across the group's cells, `--perm` 20 times, floor at
+  the `--permq` 90th percentile, about the 3rd largest of the 20: Horn's parallel analysis). The cut is
+  2-means on the cells' scores on the signal PCs; both halves must have >= `--minsize` 14 cells (small
+  outlier groups are set aside and the split retried, `--peel`). Groups that do not split are the
+  clones (at most `--maxclones`).
+* 2-means can cut through a clone (the middle one of three clones on a line, e.g. the same segment at
+  1|1, 2|1 and 3|1), which then becomes two clusters. That oversplitting is accepted: the other way
+  round, two clones in one cluster, is worse. Single-population data stays one cluster, as the
+  permutation test finds no signal PC.
+* Finally k-means with one centre per cluster, started at the clusters' means, reassigns the cells in
+  the space of the signal PCs the splits used (their directions in feature space, overlaps counted
+  once) (`--noreassign` to skip). These are the directions in which the clusters differ, also small
+  differences that are not among the top PCs of all cells; noise in the other directions is left out.
+  A cluster that loses all its cells is dropped.
+* `--permq` and `--floormargin` are also options of `chisel`, `chisel_calling` and `chisel_cloning`
+  (passed to the cell grouping and to Cloner). Lower values find smaller clones; raise them if a run
+  overclones (the first defaults were 95 and 1.5).
 * The corrected calls are each clone's majority state per bin, as in the default mode. The split tree
   is in the log.
 
 The number of clones comes out of the splitting. Re-running PCA inside each group lets small
-differences become the main signal once large ones are separated (nested, tree-like clones), and
-cutting at gaps between modes handles clones that differ by the same segment at several copy numbers.
+differences become the main signal once large ones are separated (nested, tree-like clones).
 Code: `src/chisel/CellClusterer.py`; tests: `tests/pytests/test_cloning.py`.
