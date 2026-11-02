@@ -283,5 +283,9 @@ def test_split_test_defaults_and_driver_options():
     add_split_arguments(p)
     a = p.parse_args([])
     assert (a.permq, a.floormargin) == (PERM_Q, FLOOR_MARGIN)
+    assert a.minclone == 30
+    q = argparse.ArgumentParser()
+    add_split_arguments(q, minclone=False)                               # chisel_cloning: its own -s
+    assert not hasattr(q.parse_args([]), 'minclone')
     a = p.parse_args(['--floormargin', '1.5'])
     assert split_flags(a) == split_flags(vars(a)) == ' --permq 90.0 --floormargin 1.5'

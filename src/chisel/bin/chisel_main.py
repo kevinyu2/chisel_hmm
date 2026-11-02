@@ -162,7 +162,7 @@ def parse_args():
         "pseudobulk" : args.cloning == 'divisive' and not args.nopseudobulk,
         "permq" : args.permq,
         "floormargin" : args.floormargin,
-        "minsize" : 14
+        "minsize" : args.minclone
     }
 
 
@@ -295,6 +295,7 @@ def main():
     log('Cloning', level='PROGRESS')
     cmd = 'python2.7 {} {}'
     cmd = cmd.format(get_comp('Cloner.py'), calls)
+    cmd += " -s {}".format(args['minsize'])
     if args['seed'] is not None:
         cmd += " --seed {}".format(args['seed'])
     if args['varbins'] or args['givenbins']:

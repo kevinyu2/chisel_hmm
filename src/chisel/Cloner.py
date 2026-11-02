@@ -16,7 +16,7 @@ import scipy.cluster.hierarchy as hier
 import scipy.spatial.distance
 
 from Utils import *
-from CellClusterer import PERM_Q, FLOOR_MARGIN
+from CellClusterer import PERM_Q, FLOOR_MARGIN, MIN_CLONE
 
 
 def parse_args(args):
@@ -25,7 +25,7 @@ def parse_args(args):
     parser.add_argument("INPUT", type=str, help="Input file with RDR, BAF, and inferred copy numbers.")
     parser.add_argument("-f", "--maxdiff", required=False, type=float, default=0.07, help="Maximum fraction of the genome with different copy-number states allowed in a clone (default: 0.07, when -1 is chosen the maximum cluster method of SciPy is used)")
     parser.add_argument("-r", "--refinement", required=False, type=float, default=0.15, help="Maximum difference to assign noisy cells to a clone (default: 0.15)")
-    parser.add_argument("-s", "--minsize", required=False, type=int, default=14, help="Minimum size of subpopultation to define a clone (default: 14)")
+    parser.add_argument("-s", "--minsize", required=False, type=int, default=None, help="Minimum size of subpopultation to define a clone (default: {} with divisive clustering, 14 with hamming)".format(MIN_CLONE))
     parser.add_argument("-l", "--linkage", required=False, type=str, default='weighted', help="Linkage method to use for the hierarchical clustering (default: weighted, it must be a valid linkage method available in SciPy when using a non-euclidean distance, i.e. 'single', 'complete', 'average', 'weighted')")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: none)")
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Weight every bin by its length when measuring differences between cells, so that --maxdiff and --refinement are fractions of the genome also with variable-length bins (default: disabled, every bin has the same weight)")
@@ -54,6 +54,8 @@ def parse_args(args):
         args.refinement = args.maxdiff
     if not 0.0 <= args.refinement <= 1.0:
         raise ValueError('ERROR: the refinement must be either within [0, 1]!')
+    if args.minsize is None:
+        args.minsize = MIN_CLONE if args.clustering == 'divisive' else 14
     if args.minsize <= 0:
         raise ValueError('ERROR: the minimum size of subpopulations must be positive!')
     if not args.linkage in {'single', 'complete', 'average', 'weighted'}:

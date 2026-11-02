@@ -12,7 +12,7 @@ import chisel
 
 src = os.path.dirname(chisel.__file__)
 from ..Utils import *
-from ..CellClusterer import add_split_arguments, split_flags
+from ..CellClusterer import add_split_arguments, split_flags, MIN_CLONE
 
 
 def parse_args():
@@ -21,14 +21,14 @@ def parse_args():
     parser.add_argument("INPUT", nargs='?', default='calls/calls.tsv', type=str, help="Input file with combined RDR and BAF per bin and per cell")
     parser.add_argument("-x","--rundir", required=False, default='./', type=str, help="Running directory (default: current directory)")
     parser.add_argument("-f", "--maxdiff", required=False, type=float, default=0.06, help="Maximum haplotype-specific distance between the genome of cells in the same clone (default: 0.06, when -1 is chosen the maximum cluster method of SciPy is used)")
-    parser.add_argument("-s", "--minsize", required=False, type=int, default=14, help="Minimum number of cells in a subpopulation to define a clone (default: 14)")
+    parser.add_argument("-s", "--minsize", required=False, type=int, default=None, help="Minimum number of cells in a subpopulation to define a clone (default: 30 with divisive cloning, 14 with hamming)")
     parser.add_argument("-r", "--refinement", required=False, type=float, default=None, help="Maximum difference to assign noisy cells to the closest clone (default: 0.0, note that 1.0 can be used to force the assigment of all cells)")
     parser.add_argument("--seed", required=False, type=int, default=None, help="Random seed for replication (default: None)")
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Length-weighted differences between cells, as chisel uses with variable-length bins (default: disabled)")
     parser.add_argument("--cloning", required=False, type=str, default='divisive', choices=['divisive', 'hamming'], help="Grouping of cells into clones: divisive = top-down splitting on RDR and BAF with permutation-tested splits (Cloner.py --clustering divisive; -s is the minimum clone size); hamming = CHISEL's original clustering of the called states (-f, -r; implies --nopseudobulk) (default: divisive)")
     parser.add_argument("--nopseudobulk", required=False, default=False, action='store_true', help="With divisive cloning: correct copy numbers by majority vote of each clone's cells instead of calling its pooled reads (default: pseudobulk)")
     parser.add_argument("-P", "--maxploidy", required=False, type=int, default=4, help="Maximum ploidy for the pseudobulk calling of the clones (default: 4)")
-    add_split_arguments(parser)
+    add_split_arguments(parser, minclone=False)          # -s is the minimum clone size here
     args = parser.parse_args()
 
     if not os.path.isfile(args.INPUT):
@@ -39,6 +39,8 @@ def parse_args():
         raise ValueError("The random seed  must be positive!")
     if (args.maxdiff < 0.0 and args.maxdiff != 1.0) or args.maxdiff > 1.0:
         raise ValueError("Maximum distance must be in [0, 1] or equal to -1!")
+    if args.minsize is None:
+        args.minsize = MIN_CLONE if args.cloning == 'divisive' else 14
     if args.minsize < 0:
         raise ValueError("Minimum number of cells in a clone must be positive!")
 

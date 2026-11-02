@@ -38,6 +38,7 @@ import numpy as np
 # Defaults of the split test (shared by Cloner.py and the chisel drivers).
 PERM_Q = 90.0        # noise floor = this percentile of the permuted top PC variance
 FLOOR_MARGIN = 1.2   # a signal PC must beat the noise floor by this factor
+MIN_CLONE = 30       # smallest cell group (CHISEL's own clones: 14, kept for --clustering hamming)
 
 
 def read_features(path):
@@ -141,7 +142,7 @@ def noisy_cells(X, z=5.0):
     return spread > centre + z * scale
 
 
-def divisive(X, rng, min_size=14, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN, peel=5, max_clusters=30, reassign=True,
+def divisive(X, rng, min_size=MIN_CLONE, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN, peel=5, max_clusters=30, reassign=True,
              outlier_z=5.0):
     """Top-down clustering of the rows of X -> (labels 0..K-1, -1 for noisy cells set apart; log lines)."""
     log = []
@@ -236,7 +237,7 @@ def reassign_in(X, labels, dirs, iters=100):
     return labels, moves, Q.shape[0]
 
 
-def cell_groups(path, seed=0, min_size=14, rdr_weight=0.5, noise_scale=False, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN,
+def cell_groups(path, seed=0, min_size=MIN_CLONE, rdr_weight=0.5, noise_scale=False, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN,
                 peel=5, max_clusters=30, reassign=True, outlier_z=5.0):
     """Divisive groups of the cells of a combo.tsv or calls.tsv -> (OrderedDict cell -> group name, log lines).
     Groups are Group1, Group2, ... by decreasing size; very noisy cells set apart get None."""
@@ -254,11 +255,14 @@ def cell_groups(path, seed=0, min_size=14, rdr_weight=0.5, noise_scale=False, n_
     return out, head + log
 
 
-def add_split_arguments(parser):
-    """The split-test options of the chisel drivers (passed on to CellClusterer.py and Cloner.py)."""
+def add_split_arguments(parser, minclone=True):
+    """The split-test options of the chisel drivers (passed on to CellClusterer.py and Cloner.py); minclone: also
+    --minclone, the smallest cell group (drivers without their own -s)."""
     dv = parser.add_argument_group('divisive cloning', 'The test deciding whether a group of cells is split in two (by 2-means on its signal PCs; --cloning divisive)')
     dv.add_argument("--permq", type=float, required=False, default=PERM_Q, help="Noise floor = this percentile of the top PC variance of feature-shuffled copies of the group (default: {:g})".format(PERM_Q))
     dv.add_argument("--floormargin", type=float, required=False, default=FLOOR_MARGIN, help="A signal PC must beat the noise floor by this factor; lower finds smaller clones (default: {:g})".format(FLOOR_MARGIN))
+    if minclone:
+        dv.add_argument("--minclone", type=int, required=False, default=MIN_CLONE, help="Smallest cell group / clone: a group is split only into halves of at least this many cells, and Cloner keeps clones of at least this size (default: {}; CHISEL's original cloning used 14)".format(MIN_CLONE))
     return dv
 
 
@@ -275,7 +279,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Divisive groups of cells from CHISEL's combo.tsv or calls.tsv (CELL GROUP to stdout; very noisy cells: None)")
     p.add_argument('INPUT', help='combo.tsv or calls.tsv')
     p.add_argument('--seed', type=int, default=0)
-    p.add_argument('-s', '--minsize', type=int, default=14, help='minimum group size (default: 14)')
+    p.add_argument('-s', '--minsize', type=int, default=MIN_CLONE, help='minimum group size (default: {})'.format(MIN_CLONE))
     p.add_argument('--rdrweight', type=float, default=0.5)
     p.add_argument('--noisescale', action='store_true')
     p.add_argument('--perm', type=int, default=20)

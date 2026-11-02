@@ -39,7 +39,7 @@ python2.7 Cloner.py calls/calls.tsv --clustering divisive [--seed 12] > clones/m
 * A group of cells is split in two when its own PCA has a PC beating a permutation noise floor by
   `--floormargin` 1.2x (every feature shuffled across the group's cells, `--perm` 20 times, floor at
   the `--permq` 90th percentile, about the 3rd largest of the 20: Horn's parallel analysis). The cut is
-  2-means on the cells' scores on the signal PCs; both halves must have >= `--minsize` 14 cells (small
+  2-means on the cells' scores on the signal PCs; both halves must have >= `--minsize` 30 cells (small
   outlier groups are set aside and the split retried, `--peel`). Groups that do not split are the
   clones (at most `--maxclones`).
 * 2-means can cut through a clone (the middle one of three clones on a line, e.g. the same segment at
@@ -51,6 +51,9 @@ python2.7 Cloner.py calls/calls.tsv --clustering divisive [--seed 12] > clones/m
   once) (`--noreassign` to skip). These are the directions in which the clusters differ, also small
   differences that are not among the top PCs of all cells; noise in the other directions is left out.
   A cluster that loses all its cells is dropped.
+* The smallest group is 30 cells by default (`-s`/`--minsize` of Cloner and `chisel_cloning`, `--minclone`
+  of `chisel` and `chisel_calling`; CHISEL's original cloning, `--clustering hamming`, keeps 14). It also
+  stops 2-means from cutting off small groups of noisier-than-average cells, which barely beat the floor.
 * `--permq` and `--floormargin` are also options of `chisel`, `chisel_calling` and `chisel_cloning`
   (passed to the cell grouping and to Cloner). Lower values find smaller clones; raise them if a run
   overclones (the first defaults were 95 and 1.5).
