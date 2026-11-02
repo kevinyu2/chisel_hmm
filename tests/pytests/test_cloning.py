@@ -125,8 +125,9 @@ def test_features_from_calls():
     groups, _ = write_calls(path, np.random.RandomState(5))
     cells, bins, arr = read_features(path)
     assert len(cells) == 160 and len(bins) == 80 and arr['rdr'].shape == (160, 80)
-    X = feature_matrix(arr)
+    X = feature_matrix(arr)                                   # bins in units of their expected noise
     assert X.shape == (160, 160) and np.isfinite(X).all()
+    X = feature_matrix(arr, bin_weight=False)                 # the first version: blocks at total variance 1, weighted
     assert np.isclose((X[:, :80] ** 2).sum() / 160, 0.5) and np.isclose((X[:, 80:] ** 2).sum() / 160, 0.5)
 
 
@@ -289,3 +290,35 @@ def test_split_test_defaults_and_driver_options():
     assert not hasattr(q.parse_args([]), 'minclone')
     a = p.parse_args(['--floormargin', '1.5'])
     assert split_flags(a) == split_flags(vars(a)) == ' --permq 90.0 --floormargin 1.5'
+
+
+def counts_with_short_bins(seed, n_short=40, shift=0.25):
+    """400 cells x 400 bins of Poisson reads (~70 per cell; n_short bins ~0.7, like a few kb), a 30-bin gain in 150 cells."""
+    rng = np.random.RandomState(seed)
+    nc, nb = 400, 400
+    m = np.full(nb, 70.0)
+    m[rng.choice(nb, n_short, replace=False)] = 0.7
+    clone = np.r_[np.zeros(250, int), np.ones(150, int)]
+    cn = np.ones((nc, nb))
+    cn[np.ix_(clone == 1, np.arange(100, 130))] = 1 + shift
+    count = rng.poisson(m * cn).astype(float)
+    snp = rng.poisson(np.tile(m / 10.0 + 0.1, (nc, 1)))
+    b = rng.binomial(snp, 0.5).astype(float)
+    return {'rdr': count / m, 'count': count, 'norm': np.full((nc, nb), 1e4), 'a': snp - b, 'b': b}, clone
+
+
+def test_bins_weighted_by_their_noise_keep_short_bins_from_hiding_a_clone():
+    """A few bins with < 1 read per cell hold most of the noise; unweighted, one of them sets the permutation
+    floor above the clone; weighted by expected counting noise, the clone is found and nothing is split
+    without one."""
+    from chisel.CellClusterer import bin_noise
+    arr, clone = counts_with_short_bins(0)
+    sdR, sdB = bin_noise(arr)
+    assert np.median(sdR[arr['count'].mean(0) < 5]) > 5 * np.median(sdR)     # short bins: ~10x the noise SD
+    raw, _ = divisive(feature_matrix(arr, bin_weight=False), np.random.RandomState(1), n_perm=10)
+    assert raw.max() == 0                                                        # the clone is hidden
+    lab, log = divisive(feature_matrix(arr), np.random.RandomState(1), n_perm=10)
+    assert lab.max() == 1 and ari(clone, lab) > 0.95, '\n'.join(log)
+    null, _ = counts_with_short_bins(1, shift=0.0)
+    lab, log = divisive(feature_matrix(null), np.random.RandomState(1), n_perm=10)
+    assert lab.max() == 0, '\n'.join(log)

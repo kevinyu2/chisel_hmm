@@ -31,9 +31,14 @@ python2.7 Cloner.py calls/calls.tsv --clustering divisive [--seed 12] > clones/m
 ```
 (Cloner rewrites the CORRECTED_HAP_CN column of calls.tsv in place; keep a copy to compare.)
 
-* Features: every cell's RDR and BAF in every bin of `calls.tsv`, centred per bin; the RDR and BAF
-  blocks scaled to total variance 1 and mixed `--rdrweight` : 1 - w (default 0.5); `--noisescale`
-  expresses values in units of counting noise. All bins are used.
+* Features: every cell's RDR and BAF in every bin of `calls.tsv`, centred per bin, and divided by the bin's
+  expected counting noise for a typical cell: RDR r / sqrt(m) (r the bin's mean RDR, m the cells' mean reads
+  there; Poisson), BAF sqrt(p (1 - p) mean(1/n)) (p the pooled BAF, n each cell's SNP reads, 0 terms for cells
+  without). Every feature then has noise SD ~1 and a bin counts by its (shift / noise)^2, so a few bins of a
+  few kb with < 1 read per cell cannot set the permutation floor and hide clones (UGP's bins have such bins
+  where its phase-flip test cuts). RDR and BAF are mixed sqrt(2 w) : sqrt(2 (1 - w)), `--rdrweight` w
+  (default 0.5). `--rawbins`: the first version (each block scaled to total variance 1, bins keeping their
+  own variance); `--noisescale`: every value divided by its own cell's noise instead. All bins are used.
 * Very noisy cells (robust noise level more than `--outlierz` 5 robust SDs above the typical cell) are
   set apart: clone None, own calls (`--assignoutliers` gives them the nearest clone).
 * A group of cells is split in two when its own PCA has a PC beating a permutation noise floor by

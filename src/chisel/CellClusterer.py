@@ -68,8 +68,38 @@ def read_features(path):
     return cells, bins, arr
 
 
-def feature_matrix(arr, rdr_weight=0.5, noise_scale=False):
-    """cells x (RDR bins + BAF bins), centred per bin, blocks scaled to total variance 1 and weighted."""
+def bin_noise(arr):
+    """Expected counting noise (SD across cells) of every bin's RDR and BAF, for a typical cell -> (sdR, sdB).
+
+    RDR: a cell's RDR in a bin is its read count over its expected count, times the bin's level, so its
+    Poisson SD is RDR / sqrt(reads); with the bin's mean RDR r and the cells' mean reads m there,
+    sdR = r / sqrt(m). The normal's reads scale every cell's RDR in a bin by the same factor, which the
+    centring per bin removes, so they add nothing across cells. BAF: binomial, p (1 - p) / n for a cell
+    with n SNP reads (p = the bin's pooled BAF); cells without SNP reads get the bin's mean (no spread),
+    so sdB^2 = p (1 - p) * mean over cells of (1 / n, or 0 when n = 0). Overdispersion that is the same
+    in every bin only rescales all weights and changes nothing."""
+    with np.errstate(invalid='ignore', divide='ignore'):
+        rbar = np.abs(np.nanmean(arr['rdr'], axis=0))
+        reads = np.nanmean(arr['count'], axis=0)
+        sdR = np.where(reads > 0, rbar / np.sqrt(np.where(reads > 0, reads, 1.0)), np.inf)
+        n = arr['a'] + arr['b']
+        p = np.clip(np.nansum(arr['b'], axis=0) / np.maximum(np.nansum(n, axis=0), 1.0), 0.01, 0.99)
+        inv = np.where(n > 0, 1.0 / np.where(n > 0, n, 1.0), 0.0)
+        sdB = np.sqrt(p * (1 - p) * np.nanmean(inv, axis=0))
+    sdR = np.where(np.isfinite(sdR) & (sdR > 0), sdR, np.inf)
+    sdB = np.where(np.isfinite(sdB) & (sdB > 0), sdB, np.inf)
+    return sdR, sdB
+
+
+def feature_matrix(arr, rdr_weight=0.5, noise_scale=False, bin_weight=True):
+    """cells x (RDR bins + BAF bins), centred per bin.
+
+    bin_weight (default): every bin divided by its expected counting noise (bin_noise), so every
+    feature has noise SD ~1 and a bin counts by its signal-to-noise, (shift / noise)^2; RDR and BAF are
+    then in the same units and mixed as sqrt(2 w) : sqrt(2 (1 - w)) (w = rdr_weight, 0.5: as they are).
+    Otherwise (the first version): each block scaled to total variance 1 and weighted w : 1 - w, every
+    bin keeping its own variance, so the noisiest bins (e.g. a few kb with < 1 read per cell) dominate.
+    noise_scale: every value divided by its own cell's noise instead (no bin weighting)."""
     rdr, n = arr['rdr'], arr['a'] + arr['b']
     baf = np.where(n > 0, arr['b'] / np.where(n > 0, n, 1.0), np.nan)
     R = rdr - np.nanmean(rdr, axis=0)
@@ -81,8 +111,13 @@ def feature_matrix(arr, rdr_weight=0.5, noise_scale=False):
             p = np.clip(np.nansum(arr['b'], axis=0) / np.maximum(np.nansum(n, axis=0), 1.0), 0.01, 0.99)
             bsd = np.sqrt(p * (1 - p) / np.where(n > 0, n, np.nan))
             R, B = R / rsd, B / bsd
+        elif bin_weight:
+            sdR, sdB = bin_noise(arr)
+            R, B = R / sdR, B / sdB
     R = np.nan_to_num(np.where(np.isfinite(R), R, 0.0))
     B = np.nan_to_num(np.where(np.isfinite(B), B, 0.0))
+    if bin_weight and not noise_scale:
+        return np.hstack([R * np.sqrt(2.0 * rdr_weight), B * np.sqrt(2.0 * (1.0 - rdr_weight))])
     tr = max((R ** 2).sum() / R.shape[0], 1e-12)
     tb = max((B ** 2).sum() / B.shape[0], 1e-12)
     return np.hstack([R * np.sqrt(rdr_weight / tr), B * np.sqrt((1.0 - rdr_weight) / tb)])
@@ -237,13 +272,13 @@ def reassign_in(X, labels, dirs, iters=100):
     return labels, moves, Q.shape[0]
 
 
-def cell_groups(path, seed=0, min_size=MIN_CLONE, rdr_weight=0.5, noise_scale=False, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN,
+def cell_groups(path, seed=0, min_size=MIN_CLONE, rdr_weight=0.5, noise_scale=False, bin_weight=True, n_perm=20, q=PERM_Q, margin=FLOOR_MARGIN,
                 peel=5, max_clusters=30, reassign=True, outlier_z=5.0):
     """Divisive groups of the cells of a combo.tsv or calls.tsv -> (OrderedDict cell -> group name, log lines).
     Groups are Group1, Group2, ... by decreasing size; very noisy cells set apart get None."""
     from collections import OrderedDict
     cells, bins, arr = read_features(path)
-    X = feature_matrix(arr, rdr_weight=rdr_weight, noise_scale=noise_scale)
+    X = feature_matrix(arr, rdr_weight=rdr_weight, noise_scale=noise_scale, bin_weight=bin_weight)
     labels, log = divisive(X, np.random.RandomState(seed), min_size=min_size, n_perm=n_perm, q=q, margin=margin,
                            peel=peel, max_clusters=max_clusters, reassign=reassign, outlier_z=outlier_z)
     sizes = np.bincount(labels[labels >= 0]) if (labels >= 0).any() else np.array([], dtype=int)
@@ -282,6 +317,7 @@ def main(argv=None):
     p.add_argument('-s', '--minsize', type=int, default=MIN_CLONE, help='minimum group size (default: {})'.format(MIN_CLONE))
     p.add_argument('--rdrweight', type=float, default=0.5)
     p.add_argument('--noisescale', action='store_true')
+    p.add_argument('--rawbins', action='store_true', help='no weighting of bins by their expected noise (the first version)')
     p.add_argument('--perm', type=int, default=20)
     p.add_argument('--permq', type=float, default=PERM_Q)
     p.add_argument('--floormargin', type=float, default=FLOOR_MARGIN)
@@ -290,7 +326,7 @@ def main(argv=None):
     p.add_argument('--noreassign', action='store_true')
     p.add_argument('--outlierz', type=float, default=5.0)
     a = p.parse_args(argv)
-    groups, log = cell_groups(a.INPUT, seed=a.seed, min_size=a.minsize, rdr_weight=a.rdrweight, noise_scale=a.noisescale,
+    groups, log = cell_groups(a.INPUT, seed=a.seed, min_size=a.minsize, rdr_weight=a.rdrweight, noise_scale=a.noisescale, bin_weight=not a.rawbins,
                               n_perm=a.perm, q=a.permq, margin=a.floormargin, peel=a.peel,
                               max_clusters=a.maxclones, reassign=not a.noreassign, outlier_z=a.outlierz)
     sys.stderr.write('Divisive cell groups: ' + '\n'.join(log) + '\n')

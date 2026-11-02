@@ -36,6 +36,7 @@ def parse_args(args):
     dv = parser.add_argument_group('divisive clustering (--clustering divisive)')
     dv.add_argument("--rdrweight", type=float, default=0.5, help="Weight of RDR vs BAF (1 - w) in the cell distances (default: 0.5)")
     dv.add_argument("--noisescale", default=False, action='store_true', help="Express RDR and BAF in units of their expected counting noise (default: disabled)")
+    dv.add_argument("--rawbins", default=False, action='store_true', help="Do not weight bins by their expected counting noise (default: weighted, so short noisy bins do not dominate)")
     dv.add_argument("--perm", type=int, default=20, help="Permutations per split test (default: 20)")
     dv.add_argument("--permq", type=float, default=PERM_Q, help="Noise floor = this percentile of the permuted top PC variance (default: {:g})".format(PERM_Q))
     dv.add_argument("--floormargin", type=float, default=FLOOR_MARGIN, help="A signal PC must exceed the noise floor by this factor (default: {:g})".format(FLOOR_MARGIN))
@@ -87,7 +88,7 @@ def parse_args(args):
         'groups' : args.groups,
         'pseudobulk' : args.clustering == 'divisive' and not args.nopseudobulk,
         'maxploidy' : args.maxploidy,
-        'divisive' : {'rdr_weight' : args.rdrweight, 'noise_scale' : args.noisescale, 'n_perm' : args.perm, 'q' : args.permq,
+        'divisive' : {'rdr_weight' : args.rdrweight, 'noise_scale' : args.noisescale, 'bin_weight' : not args.rawbins, 'n_perm' : args.perm, 'q' : args.permq,
                       'margin' : args.floormargin, 'peel' : args.peel,
                       'max_clusters' : args.maxclones, 'reassign' : not args.noreassign,
                       'outlier_z' : args.outlierz, 'assign_outliers' : args.assignoutliers}
@@ -203,7 +204,7 @@ def divisive_clustering(path, cells, minsize, seed, opts):
     from CellClusterer import read_features, feature_matrix, divisive
     fcells, bins, arr = read_features(path)
     assert list(fcells) == list(cells), 'cells of the features and of the calls differ'
-    X = feature_matrix(arr, rdr_weight=opts['rdr_weight'], noise_scale=opts['noise_scale'])
+    X = feature_matrix(arr, rdr_weight=opts['rdr_weight'], noise_scale=opts['noise_scale'], bin_weight=opts.get('bin_weight', True))
     log('Divisive clustering of {} cells on {} features ({} bins x RDR and BAF)'.format(X.shape[0], X.shape[1], len(bins)), level='INFO')
     labels, steps = divisive(X, np.random.RandomState(seed if seed is not None else 0), min_size=minsize,
                              n_perm=opts['n_perm'], q=opts['q'], margin=opts['margin'],
