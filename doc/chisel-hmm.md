@@ -107,3 +107,16 @@ residual. If the model is right, the squared residuals average to the model vari
 * The silhouette prefers few well-separated clusters: on the toy it merges the half-of-cells gain into
   the normal state.
 * Bins where a cell has no SNP reads have BAF 0.5 in combo.tsv and are used as such.
+
+## Cloner is opt-in; per-cell look at one bin
+
+`chisel` and `chisel_calling` no longer group cells or correct copy numbers by clone unless you pass
+`--cloner`. Without it every cell is called on its own reads (the HMM runs on every cell), no
+`cellgroups.tsv`, `clones/mapping.tsv` or `CORRECTED_HAP_CN` is made, and the plots are the uncorrected ones.
+With `--cloner` the previous behaviour applies (`--cloning`, `--nopseudobulk` and the split options only matter then).
+`chisel_cloning` is still the stand-alone cloner.
+
+`chisel_cellbin calls/calls.tsv --at chr13:50000000` (or `--bin CHR:START-END`, `--list CHR`) writes, for ONE bin,
+a table with every cell's RDR, read counts, A/B counts and BAF, and a figure: RDR vs BAF per cell, BAF vs SNP reads
+with the binomial funnel, RDR vs read starts with the Poisson funnel. Cells without a SNP read are not drawn
+(their BAF of 0.5 is a placeholder). `--mirror` plots min(BAF, 1-BAF).

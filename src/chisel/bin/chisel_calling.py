@@ -30,7 +30,8 @@ def parse_args():
     parser.add_argument("--weighted", required=False, default=False, action='store_true', help="Length-weighted distance between cells when cloning, as chisel uses with variable-length bins (--varbins/--bins) (default: disabled)")
     add_driver_arguments(parser)
     add_split_arguments(parser)
-    parser.add_argument("--cloning", required=False, type=str, default='divisive', choices=['divisive', 'hamming'], help="Grouping of cells into clones: divisive = top-down splitting on RDR and BAF with permutation-tested splits, computed before calling (calls/cellgroups.tsv); hamming = CHISEL's original clustering of the called states, after calling (implies --nopseudobulk) (default: divisive)")
+    parser.add_argument("--cloner", required=False, default=False, action='store_true', help="Also group cells into clones and correct the copy numbers by clone (calls/cellgroups.tsv, clones/mapping.tsv, CORRECTED_HAP_CN). Default: disabled, every cell is called on its own reads and nothing is clone-corrected")
+    parser.add_argument("--cloning", required=False, type=str, default='divisive', choices=['divisive', 'hamming'], help="With --cloner, grouping of cells into clones: divisive = top-down splitting on RDR and BAF with permutation-tested splits, computed before calling (calls/cellgroups.tsv); hamming = CHISEL's original clustering of the called states, after calling (implies --nopseudobulk) (default: divisive)")
     parser.add_argument("--nopseudobulk", required=False, default=False, action='store_true', help="With divisive cloning: cluster bins (--hmm) on every cell instead of the cell groups' pooled reads, and correct copy numbers by majority vote of each clone's cells instead of calling its pooled reads (default: pseudobulk)")
     args = parser.parse_args()
     hmmopts = driver_options(args)
@@ -66,7 +67,8 @@ def parse_args():
         "weighted" : args.weighted,
         "hmmopts" : hmmopts,
         "cloning" : args.cloning,
-        "pseudobulk" : args.cloning == 'divisive' and not args.nopseudobulk,
+        "cloner" : args.cloner,
+        "pseudobulk" : args.cloner and args.cloning == 'divisive' and not args.nopseudobulk,
         "permq" : args.permq,
         "floormargin" : args.floormargin,
         "minsize" : args.minclone,
@@ -89,7 +91,7 @@ def main():
 
 
     groups = None
-    if args['cloning'] == 'divisive':
+    if args['cloner'] and args['cloning'] == 'divisive':
         log('Grouping cells (divisive clustering on RDR and BAF)', level='PROGRESS')
         cmd = 'python2.7 {} {} -s {}'.format(get_comp('CellClusterer.py'), args['INPUT'], args['minsize'])
         cmd += split_flags(args)
@@ -112,29 +114,33 @@ def main():
     runcmd(cmd, dcal, out='calls.tsv')
     calls = os.path.join(dcal, 'calls.tsv')
 
-    log('Cloning', level='PROGRESS')
-    cmd = 'python2.7 {} {}'
-    cmd = cmd.format(get_comp('Cloner.py'), calls)
-    cmd += " -s {}".format(args['minsize'])
-    if args['seed'] is not None:
-        cmd += " --seed {}".format(args['seed'])
-    if args['weighted']:
-        cmd += " --weighted"
-    cmd += " --clustering {} -P {}".format(args['cloning'], args['maxploidy'])
-    if args['cloning'] == 'divisive':
-        cmd += split_flags(args)
-    if groups is not None:
-        cmd += " --groups {}".format(os.path.abspath(groups))
-    if not args['pseudobulk']:
-        cmd += " --nopseudobulk"
-    runcmd(cmd, dclo, out='mapping.tsv')
-    mapping = os.path.join(dclo, 'mapping.tsv')
+    mapping = None
+    if args['cloner']:
+        log('Cloning', level='PROGRESS')
+        cmd = 'python2.7 {} {}'
+        cmd = cmd.format(get_comp('Cloner.py'), calls)
+        cmd += " -s {}".format(args['minsize'])
+        if args['seed'] is not None:
+            cmd += " --seed {}".format(args['seed'])
+        if args['weighted']:
+            cmd += " --weighted"
+        cmd += " --clustering {} -P {}".format(args['cloning'], args['maxploidy'])
+        if args['cloning'] == 'divisive':
+            cmd += split_flags(args)
+        if groups is not None:
+            cmd += " --groups {}".format(os.path.abspath(groups))
+        if not args['pseudobulk']:
+            cmd += " --nopseudobulk"
+        runcmd(cmd, dclo, out='mapping.tsv')
+        mapping = os.path.join(dclo, 'mapping.tsv')
 
     log('Plotting', level='PROGRESS')
     os.chdir(dplo)
     up = (lambda f : os.path.join(os.pardir, f))
-    cmd = 'python2.7 {} {} -m {}'
-    cmd = cmd.format(os.path.join(src, 'Plotter.py'), up(calls), up(mapping))
+    cmd = 'python2.7 {} {}'
+    cmd = cmd.format(os.path.join(src, 'Plotter.py'), up(calls))
+    if mapping is not None:
+        cmd += ' -m {}'.format(up(mapping))
     runcmd(cmd, './')
     os.chdir(os.pardir)
 
