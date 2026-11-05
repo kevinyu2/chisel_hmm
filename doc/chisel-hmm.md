@@ -120,3 +120,9 @@ With `--cloner` the previous behaviour applies (`--cloning`, `--nopseudobulk` an
 a table with every cell's RDR, read counts, A/B counts and BAF, and a figure: RDR vs BAF per cell, BAF vs SNP reads
 with the binomial funnel, RDR vs read starts with the Poisson funnel. Cells without a SNP read are not drawn
 (their BAF of 0.5 is a placeholder). `--mirror` plots min(BAF, 1-BAF).
+
+`chisel_clusterplot calls/calls.tsv --region 13` (`--region all`, `CHR:START-END`, `--mirror`) draws, per bin, the
+pooled RDR and the pooled BAF exactly as `combo.tsv` has it (Combiner's orientation), coloured by bin cluster, with
+a cluster strip, an RDR-vs-BAF scatter and `<prefix>.clusters.tsv` (per-cluster bins, Mb, mean RDR/BAF, spread). A
+cluster whose bins alternate between BAF ~0.2 and ~0.8 means the orientation is not consistent between bins
+(compare with `--mirror`).
