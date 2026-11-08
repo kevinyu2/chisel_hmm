@@ -666,3 +666,16 @@ def test_null_selection_falls_back_to_bic_with_fewer_than_three_values_of_k():
     lengths = sequence_lengths(d.chrs, d.starts, d.ends, 'gaps')
     res = select_with_criterion(d, X, cn, lengths, None, 'counting', 'oriented', 'null', 2, 3, 1, 0, jobs=1)
     assert res['criterion'] == 'bic'
+
+
+def test_driver_hmmselect_auto_is_null_without_cloner_and_bic_with_it():
+    import argparse
+    from chisel.HMMClusterizer import add_driver_arguments, driver_options
+    def opts(extra, cloner):
+        p = argparse.ArgumentParser()
+        add_driver_arguments(p)
+        a = p.parse_args(['--hmm'] + extra)
+        a.cloner = cloner
+        return driver_options(a)['hmmselect']
+    assert opts([], False) == 'null' and opts([], True) == 'bic'
+    assert opts(['--hmmselect', 'bic'], False) == 'bic' and opts(['--hmmselect', 'null'], True) == 'null'
