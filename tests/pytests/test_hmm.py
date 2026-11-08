@@ -615,3 +615,54 @@ def test_caller_noise_option_and_report():
             head = f.readline()
             first = f.readline().split('\t')
         assert head.startswith('#CHR') and (first[11] == 'NA') == (noise == 'legacy')
+
+
+def _count_data(rng, ncell=40, nb=60):
+    """Counts like combo.tsv: two chromosomes, per-bin normal reads, a gain in half of the cells over 12 bins."""
+    from chisel.HMMClusterizer import BinData
+    chrs = ['1'] * nb + ['2'] * nb
+    starts = [i * 50000 for i in range(nb)] * 2
+    N = rng.randint(80, 400, size=2 * nb).astype(float)
+    cn = np.full((2 * nb, ncell), 2.0)
+    cn[10:22, :ncell // 2] = 3.0
+    C = rng.poisson(N[:, None] * cn / 2.0 * 0.5).astype(float)
+    nab = rng.poisson(10, size=C.shape)
+    B = rng.binomial(nab, np.where(cn == 3.0, 1 / 3.0, 0.5)).astype(float)
+    A = nab - B
+    rdr = (C / N[:, None]) / 0.5
+    baf = B / np.maximum(A + B, 1)
+    return BinData(chrs, starts, [s + 50000 for s in starts], ['c{}'.format(i) for i in range(ncell)], rdr, baf, A, B, C, N)
+
+
+def test_shift_data_keeps_each_cells_values_per_chromosome_and_rdr_from_counts():
+    from chisel.HMMClusterizer import shift_data
+    d = _count_data(np.random.RandomState(0))
+    s = shift_data(d, seed=3)
+    for lo, hi in ((0, 60), (60, 120)):
+        for j in range(len(d.cells)):
+            assert sorted(s.A[lo:hi, j]) == sorted(d.A[lo:hi, j])           # a rotation of the cell's own alleles
+            assert not np.array_equal(s.A[lo:hi, j], d.A[lo:hi, j]) or d.A[lo:hi, j].std() == 0
+    # the HMM derives RDR from COUNT / NORM_COUNT: the moved RDR must equal that of the moved counts
+    k = np.abs((s.w / d.norm[:, None]) / 0.5 - s.rdr)
+    assert k.mean() < 0.2           # rdr is Poisson noise around the same level: no 10x mismatch from stale NORM_COUNT
+
+
+def test_null_selection_runs_and_reports_the_excess():
+    from chisel.HMMClusterizer import select_with_criterion, count_samples, sequence_lengths, format_table
+    d = _count_data(np.random.RandomState(1))
+    X, _, cn = count_samples(d)
+    lengths = sequence_lengths(d.chrs, d.starts, d.ends, 'gaps')
+    res = select_with_criterion(d, X, cn, lengths, None, 'counting', 'oriented', 'null', 1, 6, 1, 0, jobs=1)
+    assert res['criterion'] == 'null' and 1 <= res['K'] <= 6
+    assert all('excess' in r for r in res['table']) and len(res['null_table']) >= 2
+    assert 'EXCESS' in format_table(res).split('\n')[0]
+    assert res['K'] >= 2                                    # the planted gain is found, not 1 state
+
+
+def test_null_selection_falls_back_to_bic_with_fewer_than_three_values_of_k():
+    from chisel.HMMClusterizer import select_with_criterion, count_samples, sequence_lengths
+    d = _count_data(np.random.RandomState(2))
+    X, _, cn = count_samples(d)
+    lengths = sequence_lengths(d.chrs, d.starts, d.ends, 'gaps')
+    res = select_with_criterion(d, X, cn, lengths, None, 'counting', 'oriented', 'null', 2, 3, 1, 0, jobs=1)
+    assert res['criterion'] == 'bic'

@@ -69,7 +69,7 @@ except Exception:
 
 TRANSMATS = ('diag', 'fixed', 'free')
 DECODINGS = ('map', 'viterbi')
-CRITERIA = ('bic', 'silhouette')
+CRITERIA = ('bic', 'silhouette', 'null')
 NOISES = ('counting', 'legacy')
 BAFS = ('oriented', 'mirrored')
 SPLITS = ('gaps', 'chromosomes')
@@ -856,8 +856,8 @@ def _fit_K(K):
 
 def select_model(X, lengths, mink=5, maxk=30, restarts=10, tau=1e-6, transmat='diag', decode='map',
                  criterion='bic', seed=0, jobs=1, n_iter=10, tol=1e-2, bic_params='hmmlearn',
-                 tied_update='exact', noise='legacy', count_noise=None):
-    """Fit K = mink..maxk and choose K. Returns a dict with 'K', 'labels', 'model' (the chosen
+                 tied_update='exact', noise='legacy', count_noise=None, ks=None):
+    """Fit K = mink..maxk (or only the K in ks) and choose K. Returns a dict with 'K', 'labels', 'model' (the chosen
     GaussianHMM), 'table' (one row per K, see _fit_K) and 'criterion'. noise='counting' needs
     count_noise (CountNoise of X, from count_samples)."""
     if noise not in NOISES:
@@ -866,8 +866,8 @@ def select_model(X, lengths, mink=5, maxk=30, restarts=10, tau=1e-6, transmat='d
         raise ValueError("noise='counting' needs count_noise")
     X = np.asarray(X, dtype=float)
     n = X.shape[0]
-    if criterion not in CRITERIA:
-        raise ValueError('criterion must be one of {}'.format(CRITERIA))
+    if criterion not in CRITERIA or criterion == 'null':
+        raise ValueError("criterion must be 'bic' or 'silhouette' here (the shift null is select_model_null)")
     if decode not in DECODINGS:
         raise ValueError('decode must be one of {}'.format(DECODINGS))
     if not np.isfinite(X).all():
@@ -882,7 +882,7 @@ def select_model(X, lengths, mink=5, maxk=30, restarts=10, tau=1e-6, transmat='d
             'seed': int(seed or 0), 'n_iter': n_iter, 'tol': tol, 'bic_params': bic_params, 'tied_update': tied_update,
             'noise': noise}
     cn = count_noise if noise == 'counting' else None
-    Ks = list(range(mink, maxk + 1))
+    Ks = sorted(set(int(k) for k in ks)) if ks else list(range(mink, maxk + 1))
     if jobs > 1 and len(Ks) > 1:
         pool = mp.Pool(processes=min(jobs, len(Ks)), initializer=_init_worker, initargs=(X, lengths, Dm, opts, cn))
         try:
@@ -901,6 +901,92 @@ def select_model(X, lengths, mink=5, maxk=30, restarts=10, tau=1e-6, transmat='d
             best = r
     return {'K': best['K'], 'labels': best['labels'], 'model': GaussianHMM.from_params(best['params'], cn),
             'table': rows, 'criterion': criterion}
+
+
+# ============================================================================================
+# 4b. Model selection against a null: how much likelihood does a state buy on data without shared structure?
+# ============================================================================================
+def shift_data(data, seed=1):
+    """Null data for model selection: every cell's bins rotated by a random offset along each chromosome.
+    A cell keeps its own segmentation, noise and autocorrelation; the events no longer line up across
+    cells, so there is no state structure left to find. A moved read count is rescaled by the new bin's
+    NORM_COUNT over the old one's, because the HMM derives RDR = (COUNT / NORM_COUNT) / ..."""
+    rng = np.random.RandomState(seed)
+    chrs = np.array(data.chrs)
+    names = [k for k in ('rdr', 'baf', 'A', 'B', 'w') if getattr(data, k) is not None]
+    src = dict((k, getattr(data, k)) for k in names)
+    new = dict((k, v.copy()) for k, v in src.items())
+    seen = []
+    for c in data.chrs:
+        if c not in seen:
+            seen.append(c)
+    for c in seen:
+        idx = np.flatnonzero(chrs == c)
+        n = len(idx)
+        if n < 2:
+            continue
+        for j in range(len(data.cells)):
+            k = rng.randint(1, n)
+            for key in names:
+                new[key][idx, j] = np.roll(src[key][idx, j], k)
+            if 'w' in new and data.norm is not None:
+                old, dst = np.roll(data.norm[idx], k), data.norm[idx]
+                new['w'][idx, j] = new['w'][idx, j] * np.where(old > 0, dst / np.where(old > 0, old, 1.0), 1.0)
+    return BinData(data.chrs, data.starts, data.ends, data.cells, new['rdr'], new['baf'],
+                   new.get('A'), new.get('B'), new.get('w'), data.norm)
+
+
+def running_median(v, window=3):
+    v = np.asarray(v, dtype=float)
+    h = window // 2
+    return np.array([np.median(v[max(0, i - h):i + h + 1]) for i in range(len(v))])
+
+
+def select_model_null(X, lengths, Xn, cn=None, cnn=None, mink=5, maxk=30, restarts=10, null_restarts=3,
+                      null_points=5, **kw):
+    """Choose K by the likelihood a state buys on the real data in excess of what it buys on the null data Xn.
+    Fits K = mink..maxk on X, the null at null_points values of K spread over the range (null_restarts restarts,
+    same seed), a quadratic through the null log-likelihoods (a line with < 3 points), the excess
+    E(K) = loglik_real(K) - null_fit(K), smooths E with a running median of 3 K and takes its maximum
+    (the smallest K at a tie). The table's criterion is -E smoothed (lowest is best), BIC is kept as BIC."""
+    kw = dict(kw)
+    kw.pop('criterion', None)
+    real = select_model(X, lengths, mink=mink, maxk=maxk, restarts=restarts, criterion='bic', count_noise=cn, **kw)
+    rows = real['table']
+    Ks = [r['K'] for r in rows]
+    pts = sorted(set(int(round(v)) for v in np.linspace(Ks[0], Ks[-1], max(2, null_points))))
+    nul = select_model(Xn, lengths, mink=mink, maxk=maxk, restarts=null_restarts, criterion='bic', count_noise=cnn, ks=pts, **kw)
+    nk = np.array([r['K'] for r in nul['table']], dtype=float)
+    nl = np.array([r['loglik'] for r in nul['table']])
+    fit = np.polyval(np.polyfit(nk, nl, min(2, len(nk) - 1)), Ks)
+    excess = np.array([r['loglik'] for r in rows]) - fit
+    smooth = running_median(excess, 3)
+    for r, e, sm, f in zip(rows, excess, smooth, fit):
+        r['bic'], r['excess'], r['null_fit'], r['criterion'] = r['criterion'], float(e), float(f), float(-sm)
+    best = rows[int(np.argmin([r['criterion'] for r in rows]))]
+    model = GaussianHMM.from_params(best['params'], cn if kw.get('noise') == 'counting' else None)
+    return {'K': best['K'], 'labels': best['labels'], 'model': model, 'table': rows, 'criterion': 'null',
+            'null_table': nul['table']}
+
+
+def select_with_criterion(data, X, cn, lengths, groups, noise, baf, criterion, mink, maxk, restarts, seed, **kw):
+    """select_model, or select_model_null (criterion 'null') with the null made from `data`. Fewer than 3 values
+    of K cannot show a trend: BIC then."""
+    if criterion != 'null':
+        return select_model(X, lengths, mink=mink, maxk=maxk, restarts=restarts, criterion=criterion, seed=seed,
+                            noise=noise, count_noise=cn if noise == 'counting' else None, **kw)
+    if min(int(maxk), data.nbins) - int(mink) < 2:
+        _fallback_log('--hmmselect null needs at least 3 values of K: using BIC')
+        return select_model(X, lengths, mink=mink, maxk=maxk, restarts=restarts, criterion='bic', seed=seed,
+                            noise=noise, count_noise=cn if noise == 'counting' else None, **kw)
+    nd = shift_data(data, seed=int(seed or 0) + 1)
+    if noise == 'counting':
+        Xn, _, cnn = count_samples(nd, groups=groups, baf=baf)
+    else:
+        Xn, _ = make_samples(nd, groups=groups, baf=baf)
+        cnn = None
+    return select_model_null(X, lengths, Xn, cn=cn if noise == 'counting' else None, cnn=cnn, mink=mink, maxk=maxk,
+                             restarts=restarts, seed=seed, noise=noise, **kw)
 
 
 def write_noise_report(path, data, names, X, labels, model, count_noise):
@@ -937,12 +1023,18 @@ def write_noise_report(path, data, names, X, labels, model, count_noise):
 
 def format_table(result):
     head = ['K', result['criterion'].upper(), 'LOGLIK', 'DECODE_SCORE', 'STATES_USED', 'STAY', 'N_PARAMS', 'RESTART']
+    null = result['criterion'] == 'null'
+    if null:
+        head += ['EXCESS', 'NULL_FIT', 'BIC']
     lines = ['\t'.join(head)]
     for r in result['table']:
         mark = ' *' if r['K'] == result['K'] else ''
-        lines.append('\t'.join([str(r['K']), '{:.6g}'.format(r['criterion']), '{:.6g}'.format(r['loglik']),
-                                '{:.6g}'.format(r['decode_score']), str(r['states_used']), '{:.6g}'.format(r['stay']),
-                                str(r['n_params']), str(r['restart'])]) + mark)
+        row = [str(r['K']), '{:.6g}'.format(r['criterion']), '{:.6g}'.format(r['loglik']),
+               '{:.6g}'.format(r['decode_score']), str(r['states_used']), '{:.6g}'.format(r['stay']),
+               str(r['n_params']), str(r['restart'])]
+        if null:
+            row += ['{:.6g}'.format(r['excess']), '{:.6g}'.format(r['null_fit']), '{:.6g}'.format(r['bic'])]
+        lines.append('\t'.join(row) + mark)
     return '\n'.join(lines)
 
 
@@ -964,7 +1056,7 @@ def add_driver_arguments(parser):
     hm = parser.add_argument_group('HMM bin clustering', 'Replace the k-medians clustering of bins in the calling step by a HATCHet2-style Gaussian HMM along the genome (Caller --clustering hmm); the per-K model selection is written to calls/hmm_selection.tsv')
     hm.add_argument("--hmm", required=False, default=False, action='store_true', help="Cluster bins with the HMM (default: disabled, k-medians)")
     hm.add_argument("--hmmk", type=int, required=False, default=None, help="Use exactly this number of clusters (sets --hmmmink and --hmmmaxk)")
-    hm.add_argument("--hmmselect", type=str, required=False, default='bic', choices=list(CRITERIA), help="Choose the number of clusters by BIC or silhouette (default: bic)")
+    hm.add_argument("--hmmselect", type=str, required=False, default='bic', choices=list(CRITERIA), help="Choose the number of clusters by BIC, silhouette, or null = the likelihood a state adds beyond what it adds on data whose bins are shifted per cell (default: bic)")
     hm.add_argument("--hmmmink", type=int, required=False, default=5, help="Smallest number of clusters (default: 5)")
     hm.add_argument("--hmmmaxk", type=int, required=False, default=30, help="Largest number of clusters (default: 30)")
     hm.add_argument("--hmmrestarts", type=int, required=False, default=10, help="Restarts per number of clusters (default: 10)")
@@ -1018,10 +1110,9 @@ def hmm_clustering(bins, cells, pos, par):
     lengths = sequence_lengths(data.chrs, data.starts, data.ends, par['split'])
     log('HMM clustering: {} bins in {} sequences, {} samples ({} features), K = {}..{}, {} restarts, {}, {} noise'.format(
         data.nbins, len(lengths), len(names), X.shape[1], par['mink'], par['maxk'], par['restarts'], par['criterion'], noise), level='INFO')
-    res = select_model(X, lengths, mink=par['mink'], maxk=par['maxk'], restarts=par['restarts'], tau=par['tau'],
-                       transmat=par['transmat'], decode=par['decode'], criterion=par['criterion'], seed=par['seed'],
-                       jobs=par['j'], n_iter=par['n_iter'], bic_params=par['bic_params'], tied_update=par['tied_update'],
-                       noise=noise, count_noise=cn if noise == 'counting' else None)
+    res = select_with_criterion(data, X, cn, lengths, groups, noise, par['baf'], par['criterion'], par['mink'], par['maxk'],
+                                par['restarts'], par['seed'], tau=par['tau'], transmat=par['transmat'], decode=par['decode'],
+                                jobs=par['j'], n_iter=par['n_iter'], bic_params=par['bic_params'], tied_update=par['tied_update'])
     log('HMM model selection (* = chosen):\n' + format_table(res), level='INFO')
     if par.get('report'):
         with open(par['report'], 'w') as f:
@@ -1162,7 +1253,7 @@ def parse_args(args=None):
     p.add_argument('-K', '--exactk', type=int, default=0, help='Fit only this K (default: choose in [mink, maxk])')
     p.add_argument('--mink', type=int, default=5, help='Smallest K (default: 5, as HATCHet2)')
     p.add_argument('--maxk', type=int, default=30, help='Largest K (default: 30, as HATCHet2)')
-    p.add_argument('--select', default='bic', choices=CRITERIA, help='Choose K by BIC (lowest) or silhouette (highest) (default: bic)')
+    p.add_argument('--select', default='bic', choices=CRITERIA, help='Choose K by BIC (lowest), silhouette (highest) or null (log-likelihood beyond the shifted-bins null) (default: bic)')
     p.add_argument('--restarts', type=int, default=10, help='Restarts per K (default: 10)')
     p.add_argument('--tau', type=float, default=1e-6, help='Initial probability of moving to another state (default: 1e-6)')
     p.add_argument('--transmat', default='diag', choices=TRANSMATS, help='diag: one learned stay probability; fixed: tau kept; free: full matrix (default: diag)')
@@ -1209,10 +1300,9 @@ def main(args=None):
     lengths = sequence_lengths(data.chrs, data.starts, data.ends, a.split)
     _fallback_log('{} bins in {} sequences x {} samples ({} features); K = {}..{}, {} restarts, {}, {}, {}, {} noise'.format(
         data.nbins, len(lengths), len(names), X.shape[1], a.mink, min(a.maxk, data.nbins), a.restarts, a.select, a.transmat, a.decode, noise))
-    res = select_model(X, lengths, mink=a.mink, maxk=a.maxk, restarts=a.restarts, tau=a.tau, transmat=a.transmat,
-                       decode=a.decode, criterion=a.select, seed=a.seed, jobs=a.jobs, n_iter=a.iter,
-                       bic_params=a.bicparams, tied_update=a.tiedupdate, noise=noise,
-                       count_noise=cn if noise == 'counting' else None)
+    res = select_with_criterion(data, X, cn, lengths, groups, noise, a.baf, a.select, a.mink, a.maxk, a.restarts, a.seed,
+                                tau=a.tau, transmat=a.transmat, decode=a.decode, jobs=a.jobs, n_iter=a.iter,
+                                bic_params=a.bicparams, tied_update=a.tiedupdate)
     if a.noise_report:
         write_noise_report(a.noise_report, data, names, X, res['labels'], res['model'], cn)
     sys.stderr.write('\nModel selection (* = chosen):\n' + format_table(res) + '\n')

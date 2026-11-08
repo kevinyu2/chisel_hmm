@@ -42,7 +42,7 @@ def parse_args(args):
     hmm.add_argument("--hmmk", type=int, default=None, help="Use exactly this number of clusters (sets --hmmmink and --hmmmaxk)")
     hmm.add_argument("--hmmmink", type=int, default=5, help="Smallest number of clusters (default: 5)")
     hmm.add_argument("--hmmmaxk", type=int, default=30, help="Largest number of clusters (default: 30)")
-    hmm.add_argument("--hmmselect", type=str, default='bic', choices=['bic', 'silhouette'], help="Choose K by BIC (lowest) or silhouette (highest) (default: bic)")
+    hmm.add_argument("--hmmselect", type=str, default='bic', choices=['bic', 'silhouette', 'null'], help="Choose K by BIC (lowest), silhouette (highest) or null (likelihood beyond the shifted-bins null) (default: bic)")
     hmm.add_argument("--hmmrestarts", type=int, default=10, help="Restarts per K (default: 10)")
     hmm.add_argument("--hmmtau", type=float, default=1e-6, help="Initial probability of moving to another state (default: 1e-6)")
     hmm.add_argument("--hmmtransmat", type=str, default='diag', choices=['diag', 'fixed', 'free'], help="diag: one learned stay probability; fixed: tau kept; free: full matrix (default: diag)")
