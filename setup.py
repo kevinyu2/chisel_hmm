@@ -58,6 +58,7 @@ setuptools.setup(
                                       'chisel_bins=chisel.Binner:main',
                                       'chisel_binsplot=chisel.BinPlotter:main',
                                       'chisel_hmmstates=chisel.HMMClusterizer:main',
+                                      'chisel_cellhmm=chisel.CellHMM:main',
                                       'chisel_cellbin=chisel.CellBinPlotter:main',
                                       'chisel_clusterplot=chisel.ClusterPlotter:main']}
 )
