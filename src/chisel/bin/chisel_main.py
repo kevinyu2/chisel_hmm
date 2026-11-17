@@ -11,6 +11,8 @@ import chisel
 
 src = os.path.dirname(chisel.__file__)
 from ..Utils import *
+from ..HMMClusterizer import add_driver_arguments, driver_options, caller_flags
+from ..CellClusterer import add_split_arguments, split_flags
 
 
 def parse_args():
@@ -47,6 +49,11 @@ def parse_args():
     vb.add_argument("--regions", type=str, required=False, default=None, help="BED file of regions that bins cannot span (default: chromosome arms of --refversion)")
     vb.add_argument("--refversion", type=str, required=False, default='auto', choices=['auto', 'hg19', 'hg38', 'none'], help="Reference version for chromosome arms (default: auto-detected from chr1 length)")
     vb.add_argument("--blacklist", type=str, required=False, default=None, help="BED file of regions to exclude from bins (default: none)")
+    add_driver_arguments(parser)
+    add_split_arguments(parser)
+    parser.add_argument("--cloner", required=False, default=False, action='store_true', help="Also group cells into clones and correct the copy numbers by clone (calls/cellgroups.tsv, clones/mapping.tsv, CORRECTED_HAP_CN). Default: disabled, every cell is called on its own reads and nothing is clone-corrected")
+    parser.add_argument("--cloning", required=False, type=str, default='divisive', choices=['divisive', 'hamming'], help="With --cloner, grouping of cells into clones: divisive = top-down splitting on RDR and BAF with permutation-tested splits, computed before calling (calls/cellgroups.tsv); hamming = CHISEL's original clustering of the called states, after calling (implies --nopseudobulk) (default: divisive)")
+    parser.add_argument("--nopseudobulk", required=False, default=False, action='store_true', help="With divisive cloning: cluster bins (--hmm) on every cell instead of the cell groups' pooled reads, and correct copy numbers by majority vote of each clone's cells instead of calling its pooled reads (default: pseudobulk)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.rundir):
@@ -67,6 +74,7 @@ def parse_args():
         raise ValueError("The maximum total copy number to consider for balanced cluster must be at least 2!")
     if args.upperk < 1:
         raise ValueError("The maximum number of clusters must be positive!")
+    hmmopts = driver_options(args)
     if args.bins is not None and args.varbins:
         raise ValueError("Use either --bins (precomputed bins) or --varbins (bins computed by CHISEL), not both!")
     if args.bins is not None:
@@ -149,7 +157,14 @@ def parse_args():
         "minsnps" : args.minsnps,
         "regions" : args.regions,
         "refversion" : args.refversion,
-        "blacklist" : args.blacklist
+        "blacklist" : args.blacklist,
+        "hmmopts" : hmmopts,
+        "cloning" : args.cloning,
+        "cloner" : args.cloner,
+        "pseudobulk" : args.cloner and args.cloning == 'divisive' and not args.nopseudobulk,
+        "permq" : args.permq,
+        "floormargin" : args.floormargin,
+        "minsize" : args.minclone
     }
 
 
@@ -256,29 +271,56 @@ def main():
     runcmd(cmd, dcom, out='combo.tsv')
     com = os.path.join(dcom, 'combo.tsv')
 
+
+    groups = None
+    if args['cloner'] and args['cloning'] == 'divisive':
+        log('Grouping cells (divisive clustering on RDR and BAF)', level='PROGRESS')
+        cmd = 'python2.7 {} {} -s {}'.format(get_comp('CellClusterer.py'), com, args['minsize'])
+        cmd += split_flags(args)
+        if args['seed'] is not None:
+            cmd += " --seed {}".format(args['seed'])
+        runcmd(cmd, dcal, out='cellgroups.tsv', log='cellgroups.log')
+        groups = os.path.join(dcal, 'cellgroups.tsv')
+        if args['hmmopts'] and args['pseudobulk'] and not args['hmmopts'].get('hmmgroups'):
+            args['hmmopts']['hmmgroups'] = os.path.abspath(groups)
+            log('HMM bin clustering on the pooled reads of the cell groups', level='INFO')
+
     log('Calling', level='PROGRESS')
     cmd = 'python2.7 {} {} -P {} -K {} -j {}'
     cmd = cmd.format(get_comp('Caller.py'), com, args['maxploidy'], args['upperk'], args['jobs'])
     if args['seed'] is not None:
         cmd += " --seed {}".format(args['seed'])
+    cmd += caller_flags(args['hmmopts'], os.path.join(dcal, 'hmm_selection.tsv'))
     runcmd(cmd, dcal, out='calls.tsv')
     calls = os.path.join(dcal, 'calls.tsv')
 
-    log('Cloning', level='PROGRESS')
-    cmd = 'python2.7 {} {}'
-    cmd = cmd.format(get_comp('Cloner.py'), calls)
-    if args['seed'] is not None:
-        cmd += " --seed {}".format(args['seed'])
-    if args['varbins'] or args['givenbins']:
-        cmd += " --weighted"
-    runcmd(cmd, dclo, out='mapping.tsv')
-    mapping = os.path.join(dclo, 'mapping.tsv')
+    mapping = None
+    if args['cloner']:
+        log('Cloning', level='PROGRESS')
+        cmd = 'python2.7 {} {}'
+        cmd = cmd.format(get_comp('Cloner.py'), calls)
+        cmd += " -s {}".format(args['minsize'])
+        if args['seed'] is not None:
+            cmd += " --seed {}".format(args['seed'])
+        if args['varbins'] or args['givenbins']:
+            cmd += " --weighted"
+        cmd += " --clustering {} -P {}".format(args['cloning'], args['maxploidy'])
+        if args['cloning'] == 'divisive':
+            cmd += split_flags(args)
+        if groups is not None:
+            cmd += " --groups {}".format(os.path.abspath(groups))
+        if not args['pseudobulk']:
+            cmd += " --nopseudobulk"
+        runcmd(cmd, dclo, out='mapping.tsv')
+        mapping = os.path.join(dclo, 'mapping.tsv')
 
     log('Plotting', level='PROGRESS')
     os.chdir(dplo)
     up = (lambda f : os.path.join(os.pardir, f))
-    cmd = 'python2.7 {} {} -m {}'
-    cmd = cmd.format(os.path.join(src, 'Plotter.py'), up(calls), up(mapping))
+    cmd = 'python2.7 {} {}'
+    cmd = cmd.format(os.path.join(src, 'Plotter.py'), up(calls))
+    if mapping is not None:
+        cmd += ' -m {}'.format(up(mapping))
     runcmd(cmd, './')
     os.chdir(os.pardir)
 
